@@ -14,7 +14,7 @@
       },
       "select_device": {
         "title": "Sélectionner un appareil",
-        "description": "{device_count} appareil(s) trouvé(s). Sélectionnez un appareil dans la liste ci-dessous ou entrez une adresse IP manuellement.",
+        "description": "{device_count} appareil(s) trouvé(s). Sélectionnez un appareil, relancez la découverte ou entrez une adresse IP manuellement.",
         "data": {
           "ip_address": "Appareil",
           "port": "Port UDP (défaut: 30000)",
@@ -28,6 +28,13 @@
           "ip_address": "Adresse IP",
           "port": "Port UDP",
           "ble_mac": "Adresse MAC Bluetooth (optionnel)"
+        }
+      },
+      "clear_schedules": {
+        "title": "Reinitialiser les horaires existants",
+        "description": "Voulez-vous desactiver toutes les plages horaires manuelles existantes sur l'appareil ? {info}",
+        "data": {
+          "clear_schedules": "Desactiver toutes les plages horaires manuelles existantes"
         }
       }
     },

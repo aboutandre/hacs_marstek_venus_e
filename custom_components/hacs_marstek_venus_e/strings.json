@@ -14,7 +14,7 @@
       },
       "select_device": {
         "title": "Select Device",
-        "description": "Found {device_count} device(s). Select a device from the list below or enter an IP address manually.",
+        "description": "Found {device_count} device(s). Select a device, retry discovery, or enter an IP address manually.",
         "data": {
           "ip_address": "Device",
           "port": "UDP Port (default: 30000)",
@@ -31,10 +31,10 @@
         }
       },
       "clear_schedules": {
-        "title": "Clear Manual Schedules?",
-        "description": "Do you want to clear all existing manual schedules? {info}",
+        "title": "Reset Existing Schedules",
+        "description": "Do you want to disable all existing manual schedule slots on the device? {info}",
         "data": {
-          "clear_schedules": "Clear all manual schedules (10 time slots)"
+          "clear_schedules": "Disable all existing manual schedule slots"
         }
       }
     },

@@ -27,6 +27,9 @@ from .udp_client import MarstekUDPClient
 
 _LOGGER = logging.getLogger(__name__)
 
+ACTION_MANUAL = "manual"
+ACTION_RETRY_DISCOVERY = "retry_discovery"
+
 
 class MarstekConfigFlow(config_entries.ConfigFlow, domain="hacs_marstek_venus_e"):
     """Config flow for Marstek Venus E."""
@@ -114,8 +117,11 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain="hacs_marstek_venus_e"
 
             _LOGGER.debug("User selected device value: %s (port %s)", selected, port)
 
+            if selected == ACTION_RETRY_DISCOVERY:
+                return await self.async_step_discovery()
+
             # If user chose manual entry, present a dedicated form
-            if selected == "manual":
+            if selected == ACTION_MANUAL:
                 return await self.async_step_manual_ip()
 
             # Otherwise selected should be an IP (from device_options) or direct input
@@ -158,8 +164,9 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain="hacs_marstek_venus_e"
                 label = f"{device_ip} - {device_name} [{src}]"
                 device_options[device_ip] = label
         
-        # Add manual entry option
-        device_options["manual"] = "Enter IP manually"
+        # Add setup actions.
+        device_options[ACTION_RETRY_DISCOVERY] = "Retry device discovery"
+        device_options[ACTION_MANUAL] = "Enter IP manually"
         
         # Build schema
         schema = {}
