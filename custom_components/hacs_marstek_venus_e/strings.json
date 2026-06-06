@@ -3,9 +3,17 @@
     "step": {
       "user": {
         "title": "Marstek Venus E Setup",
-        "description": "Start the setup process to find and connect to your Marstek Venus E device.",
+        "description": "What would you like to add?",
+        "menu_options": {
+          "battery": "Battery device",
+          "energy_manager": "Energy Manager (zero-grid multi-battery coordination)"
+        }
+      },
+      "energy_manager": {
+        "title": "Energy Manager",
+        "description": "{info}",
         "data": {
-          "confirm": "Continue"
+          "grid_sensor": "Grid power sensor (positive = importing)"
         }
       },
       "discovery": {

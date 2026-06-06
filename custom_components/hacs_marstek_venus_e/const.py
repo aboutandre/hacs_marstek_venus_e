@@ -300,3 +300,36 @@ CONF_PORT: Final = "port"
 CONF_BLE_MAC: Final = "ble_mac"
 CONF_TIMEOUT: Final = "timeout"
 CONF_SCAN_INTERVAL: Final = "scan_interval"
+
+# ---------------------------------------------------------------------------
+# Energy Manager (zero-grid multi-battery coordination brain)
+# ---------------------------------------------------------------------------
+# An optional second config-entry TYPE. Battery entries are unaffected.
+CONF_ENTRY_TYPE: Final = "entry_type"
+ENTRY_TYPE_BATTERY: Final = "battery"
+ENTRY_TYPE_MANAGER: Final = "energy_manager"
+
+# Manager config keys
+CONF_GRID_SENSOR: Final = "grid_sensor"        # HA entity_id, + = import
+CONF_TARGET_GRID_W: Final = "target_grid_w"
+CONF_KP: Final = "kp"
+CONF_KD: Final = "kd"
+CONF_DEADBAND_W: Final = "deadband_w"
+CONF_MIN_SOC: Final = "min_soc"
+CONF_MAX_STEP_W: Final = "max_step_w"
+
+# Manager defaults
+DEFAULT_TARGET_GRID_W: Final = -50
+DEFAULT_KP: Final = 0.8
+DEFAULT_KD: Final = 0.2
+DEFAULT_DEADBAND_W: Final = 30
+DEFAULT_MIN_SOC: Final = 11
+DEFAULT_MAX_STEP_W: Final = 2500
+DEFAULT_MAX_BATTERY_POWER: Final = 2500
+
+# Control timing
+MANAGER_TICK_S: Final = 3.0          # control loop period (proven cadence from live test)
+MANAGER_CD_TIME_S: Final = 10        # passive setpoint auto-revert (> tick)
+MANAGER_GRID_MAX_AGE_S: Final = 20.0 # grid sample older than this -> SAFE
+MANAGER_BATTERY_FAIL_THRESHOLD: Final = 3
+MANAGER_CYCLE_FAIL_THRESHOLD: Final = 3

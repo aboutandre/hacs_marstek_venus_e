@@ -13,10 +13,13 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BLE_MAC,
+    CONF_ENTRY_TYPE,
+    CONF_GRID_SENSOR,
     CONF_TIMEOUT,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
+    ENTRY_TYPE_MANAGER,
     MODE_AUTO,
     MODE_AI,
     MODE_MANUAL,
@@ -49,30 +52,55 @@ class MarstekConfigFlow(config_entries.ConfigFlow, domain="hacs_marstek_venus_e"
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle a flow initiated by the user.
-        
-        Starts the discovery process.
-        
-        Args:
-            user_input: Input from the user
-            
-        Returns:
-            Config flow result
-        """
+        """Entry point: choose what to add — a battery device or the Energy Manager."""
+        return self.async_show_menu(
+            step_id="user",
+            menu_options=["battery", "energy_manager"],
+        )
+
+    async def async_step_battery(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Add a Marstek battery device (starts discovery)."""
+        return await self.async_step_discovery()
+
+    async def async_step_energy_manager(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Add the Energy Manager (zero-grid multi-battery coordination brain)."""
+        errors: dict[str, str] = {}
+
         if user_input is not None:
-            # User clicked continue, move to discovery
-            return await self.async_step_discovery()
+            # Only one manager makes sense.
+            await self.async_set_unique_id("energy_manager")
+            self._abort_if_unique_id_configured()
+            return self.async_create_entry(
+                title="Marstek Energy Manager",
+                data={
+                    CONF_ENTRY_TYPE: ENTRY_TYPE_MANAGER,
+                    CONF_GRID_SENSOR: user_input[CONF_GRID_SENSOR],
+                },
+            )
 
         schema = vol.Schema(
             {
-                vol.Required("confirm", default=True): bool,
+                vol.Required(CONF_GRID_SENSOR): selector.EntitySelector(
+                    selector.EntitySelectorConfig(
+                        domain="sensor",
+                        device_class="power",
+                    )
+                ),
             }
         )
-
         return self.async_show_form(
-            step_id="user",
+            step_id="energy_manager",
             data_schema=schema,
-            description_placeholders={},
+            errors=errors,
+            description_placeholders={
+                "info": "Select your grid power sensor (positive = importing). "
+                "Tuning (target, gains, min SOC) is adjustable afterwards via the "
+                "manager's number entities."
+            },
         )
 
     async def async_step_discovery(

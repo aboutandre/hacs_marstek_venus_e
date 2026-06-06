@@ -21,6 +21,7 @@ from homeassistant.helpers.update_coordinator import (
 )
 
 from .const import DOMAIN, ALL_SENSORS
+from .manager import EnergyManagerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,17 +31,17 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up sensor platform.
-    
-    Args:
-        hass: Home Assistant instance
-        entry: Configuration entry
-        async_add_entities: Callback to add entities
-    """
+    """Set up sensor platform (manager status sensors, or battery sensors)."""
     coordinator: DataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
 
+    if isinstance(coordinator, EnergyManagerCoordinator):
+        async_add_entities(
+            ManagerSensor(coordinator, entry.entry_id, entry.title, d)
+            for d in MANAGER_SENSORS
+        )
+        return
+
     entities: list[MarstekSensor] = []
-    
     for sensor_id, sensor_config in ALL_SENSORS.items():
         entities.append(
             MarstekSensor(
@@ -52,6 +53,49 @@ async def async_setup_entry(
         )
 
     async_add_entities(entities)
+
+
+# (key in status dict, name, unit, device_class, icon)
+MANAGER_SENSORS: tuple[tuple[str, str, str | None, str | None, str], ...] = (
+    ("state", "Status", None, None, "mdi:state-machine"),
+    ("grid_power", "Grid Power Seen", "W", "power", "mdi:transmission-tower"),
+    ("command_total", "Total Battery Command", "W", "power", "mdi:home-battery"),
+    ("target_grid_w", "Target Grid Power", "W", "power", "mdi:target"),
+)
+
+
+class ManagerSensor(CoordinatorEntity, SensorEntity):
+    """A status sensor of the Energy Manager (reads the coordinator status dict)."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator, entry_id, title, desc) -> None:
+        super().__init__(coordinator)
+        key, name, unit, device_class, icon = desc
+        self._key = key
+        self._attr_name = name
+        self._attr_native_unit_of_measurement = unit
+        self._attr_device_class = device_class
+        self._attr_icon = icon
+        self._attr_unique_id = f"{entry_id}_mgr_{key}"
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry_id)},
+            "name": title,
+            "manufacturer": "Marstek",
+            "model": "Energy Manager",
+        }
+
+    @property
+    def native_value(self) -> Any:
+        data = self.coordinator.data or {}
+        return data.get(self._key)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        if self._key != "state":
+            return None
+        data = self.coordinator.data or {}
+        return {"setpoints": data.get("setpoints"), "safety": data.get("safety")}
 
 
 class MarstekSensor(CoordinatorEntity, SensorEntity):
