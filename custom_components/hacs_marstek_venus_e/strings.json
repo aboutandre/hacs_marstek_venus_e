@@ -68,6 +68,13 @@
           "configure_update_interval": "Configure Update Interval"
         }
       },
+      "manager_options": {
+        "title": "Energy Manager Options",
+        "description": "{info}",
+        "data": {
+          "ev_sensor": "EV charger power sensor (excluded from dispatch)"
+        }
+      },
       "configure_manual_mode": {
         "title": "Configure Manual Mode Schedule",
         "description": "Set up charging/discharging schedules for Manual mode. {power_info}",

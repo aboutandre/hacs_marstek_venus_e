@@ -59,6 +59,7 @@ async def async_setup_entry(
 MANAGER_SENSORS: tuple[tuple[str, str, str | None, str | None, str], ...] = (
     ("state", "Status", None, None, "mdi:state-machine"),
     ("grid_power", "Grid Power Seen", "W", "power", "mdi:transmission-tower"),
+    ("ev_power", "EV Power (excluded)", "W", "power", "mdi:ev-station"),
     ("command_total", "Total Battery Command", "W", "power", "mdi:home-battery"),
     ("target_grid_w", "Target Grid Power", "W", "power", "mdi:target"),
 )

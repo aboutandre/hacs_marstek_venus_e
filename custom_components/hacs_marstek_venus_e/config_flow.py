@@ -14,6 +14,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_BLE_MAC,
     CONF_ENTRY_TYPE,
+    CONF_EV_SENSOR,
     CONF_GRID_SENSOR,
     CONF_TIMEOUT,
     CONF_SCAN_INTERVAL,
@@ -363,10 +364,45 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Manage the options - show menu."""
+        """Manage the options - show menu (or manager options for the Energy Manager)."""
+        if self._config_entry.data.get(CONF_ENTRY_TYPE) == ENTRY_TYPE_MANAGER:
+            return await self.async_step_manager_options()
         return self.async_show_menu(
             step_id="init",
             menu_options=["configure_manual_mode", "configure_update_interval"],
+        )
+
+    async def async_step_manager_options(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Configure the Energy Manager (e.g. the EV charger sensor to exclude)."""
+        if user_input is not None:
+            new_options = {**self._config_entry.options}
+            ev = user_input.get(CONF_EV_SENSOR)
+            if ev:
+                new_options[CONF_EV_SENSOR] = ev
+            else:
+                new_options.pop(CONF_EV_SENSOR, None)  # cleared => no exclusion
+            return self.async_create_entry(title="", data=new_options)
+
+        current_ev = self._config_entry.options.get(CONF_EV_SENSOR, "")
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_EV_SENSOR,
+                    description={"suggested_value": current_ev} if current_ev else {},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", device_class="power")
+                ),
+            }
+        )
+        return self.async_show_form(
+            step_id="manager_options",
+            data_schema=schema,
+            description_placeholders={
+                "info": "Optional: select your EV charger power sensor. Its load is "
+                "excluded so the batteries cover the house, not the car. Leave empty to disable."
+            },
         )
     
     async def async_step_configure_manual_mode(

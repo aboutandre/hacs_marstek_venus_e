@@ -25,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_DEADBAND_W,
+    CONF_EV_SENSOR,
     CONF_GRID_SENSOR,
     CONF_KD,
     CONF_KP,
@@ -64,7 +65,12 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         )
         self.entry = entry
         self.grid_sensor: str = entry.data[CONF_GRID_SENSOR]
+        self.ev_sensor: str | None = entry.options.get(CONF_EV_SENSOR) or None
         self.enabled: bool = entry.options.get("enabled", True)
+        # Cache of last good EV reading (fails toward "exclude" = safe: never dump battery into the car)
+        self._last_ev_power: float = 0.0
+        self._last_ev_ts: float = 0.0
+        self._ev_power: float = 0.0  # EV power excluded this tick (for status)
 
         self.controller = ZeroGridController(self._build_controller_config())
         self.supervisor = SafetySupervisor(
@@ -94,6 +100,7 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         """Re-read options into the live controller (called after a setting changes)."""
         self.controller.config = self._build_controller_config()
         self.min_soc = float(self._opt(CONF_MIN_SOC, DEFAULT_MIN_SOC))
+        self.ev_sensor = self.entry.options.get(CONF_EV_SENSOR) or None
         self.enabled = self.entry.options.get("enabled", True)
 
     # ---- battery access -------------------------------------------------
@@ -116,6 +123,29 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
         fresh = age <= MANAGER_GRID_MAX_AGE_S
         return value, fresh
+
+    def _read_ev(self, now: float) -> float:
+        """EV charger power to EXCLUDE from dispatch (W, >=0).
+
+        Fails safe: if the EV sensor is configured but unreadable, keep using the last
+        good value for a short window (so a sensor blip never drops the exclusion and
+        dumps battery into the car). After that window, fall back to 0.
+        """
+        if not self.ev_sensor:
+            return 0.0
+        state = self.hass.states.get(self.ev_sensor)
+        if state is not None and state.state not in ("unknown", "unavailable", None, ""):
+            try:
+                value = max(0.0, float(state.state))  # charging is a load; ignore sign noise
+                self._last_ev_power = value
+                self._last_ev_ts = now
+                return value
+            except (ValueError, TypeError):
+                pass
+        # Unreadable: reuse last good value if recent, else assume no EV.
+        if now - self._last_ev_ts <= MANAGER_GRID_MAX_AGE_S:
+            return self._last_ev_power
+        return 0.0
 
     async def _release_batteries(self) -> None:
         """Hand all batteries back to their own Auto mode (safe idle)."""
@@ -152,9 +182,10 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             return self._status("disabled", grid=None, command=0, setpoints={})
         self._released = False
 
-        # Grid
+        # Grid + EV (the EV load is excluded so batteries cover the house, not the car)
         grid, fresh = self._read_grid()
         self.supervisor.record_grid(grid is not None and fresh, now)
+        self._ev_power = self._read_ev(now)
 
         # Batteries
         states: list[BatteryState] = []
@@ -192,8 +223,10 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             self.supervisor.record_cycle(ok=False)
             return self._status("hold", grid=grid, command=0, setpoints={})
 
-        # NORMAL dispatch
-        setpoints = self.controller.update(grid_power=grid, batteries=states)
+        # NORMAL dispatch — subtract the EV load so the controller drives the HOUSE
+        # grid toward target and the car is left to be served by the grid.
+        effective_grid = grid - self._ev_power
+        setpoints = self.controller.update(grid_power=effective_grid, batteries=states)
         results = await asyncio.gather(
             *(
                 self._safe_call(coord_by_id[bid].client.set_passive_mode, sp, MANAGER_CD_TIME_S)
@@ -219,6 +252,8 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             "state": state,
             "enabled": self.enabled,
             "grid_power": grid,
+            "ev_power": self._ev_power,
+            "effective_grid": (grid - self._ev_power) if grid is not None else None,
             "command_total": command,
             "setpoints": setpoints,
             "safety": self.supervisor.status(time.monotonic()),

@@ -311,6 +311,7 @@ ENTRY_TYPE_MANAGER: Final = "energy_manager"
 
 # Manager config keys
 CONF_GRID_SENSOR: Final = "grid_sensor"        # HA entity_id, + = import
+CONF_EV_SENSOR: Final = "ev_sensor"            # HA entity_id, EV charger power (excluded from dispatch)
 CONF_TARGET_GRID_W: Final = "target_grid_w"
 CONF_KP: Final = "kp"
 CONF_KD: Final = "kd"
