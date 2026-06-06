@@ -11,6 +11,7 @@ A comprehensive Home Assistant custom integration for the **Marstek Venus E** ba
 
 <!-- vscode-markdown-toc -->
 * 1. [Features](#Features)
+* [⚡ Energy Manager (Zero-Grid Multi-Battery Coordination)](#EnergyManager)
 * 2. [Installation](#Installation)
 	* 2.1. [HACS (Recommended)](#HACSRecommended)
 	* 2.2. [Manual Installation](#ManualInstallation)
@@ -93,6 +94,109 @@ A comprehensive Home Assistant custom integration for the **Marstek Venus E** ba
 - Non-blocking async implementation
 - Comprehensive device information
 - Multi-language support (English, French)
+
+✅ **Energy Manager — Zero-Grid Multi-Battery Coordination** (optional)
+- Software "brain" that keeps your **grid exchange near zero** by charging/discharging your batteries to match house load
+- **Coordinates multiple batteries** with SOC-based load sharing (discharge favors high-SOC units, charge favors low-SOC)
+- Runs entirely over the **local UDP API** — no extra hardware, **survives Home Assistant restarts** (no battery power-cycling)
+- Tunable from the UI (target, gains, deadband, min SOC) + live status sensors
+- Built-in safety: grid-staleness guard, per-battery health/exclusion, watchdog → SAFE, auto-reverting setpoints
+
+##  <a name='EnergyManager'></a>⚡ Energy Manager — Zero-Grid Multi-Battery Coordination
+
+The **Energy Manager** is an optional second integration entry that turns your Marstek
+batteries into a coordinated, grid-balancing storage pool. It reads a grid power sensor and
+continuously charges/discharges the batteries so that your **import/export stays near zero**,
+splitting the work across all your batteries by state of charge.
+
+It is fully **local** (UDP JSON-RPC, port 30000) and **restart-safe**: because the protocol is
+connectionless, a Home Assistant or integration restart never leaves a battery "stuck" — and
+every setpoint carries an auto-revert timer as a last-resort safety net.
+
+> Think of it as a self-hosted "zero export/import controller" for multiple Venus E units,
+> with no cloud and no Modbus.
+
+### How it works
+
+```
+grid power sensor ──▶ Energy Manager (every ~3s)
+                        │  PD control: error = grid − target
+                        │  → total battery power command (ramp-limited, clamped)
+                        │  → split across batteries by SOC
+                        ▼
+              ES.SetMode "Passive" (power, cd_time) ──▶ each battery
+```
+
+- **PD controller**: an incremental Proportional-Derivative loop drives grid power to the target.
+  Because a 1 W change in battery power moves grid power ~1 W the other way, it reaches zero
+  steady-state error even with a conservative gain, while the derivative term damps overshoot.
+- **SOC-based split**: discharging favors higher-SOC batteries, charging favors lower-SOC ones,
+  respecting each unit's power limit and min/max SOC (water-filled, with spill-over).
+- **Auto-revert**: each `Passive` setpoint uses a countdown (`cd_time`); if the loop ever stops,
+  batteries return to 0 W on their own within a few seconds.
+
+### Requirements
+
+- At least one Marstek battery already added to this integration.
+- A **grid power sensor** in Home Assistant (positive = importing), e.g. a Shelly Pro 3EM,
+  P1 meter, or your inverter's grid sensor.
+
+### Setup
+
+1. **Settings → Devices & Services → Add Integration → Marstek Venus E**.
+2. Choose **Energy Manager (zero-grid multi-battery coordination)** from the menu.
+3. Select your **grid power sensor** and submit.
+4. A **Marstek Energy Manager** device is created. Turn on **Zero-Grid Control** to start.
+
+### Entities
+
+**Switch**
+| Entity | Description |
+|---|---|
+| Zero-Grid Control | Master enable. When off, batteries are released to their own `Auto` mode. |
+
+**Numbers (tuning)**
+| Entity | Default | Description |
+|---|---|---|
+| Target Grid Power | −50 W | Desired grid power. Slightly negative = tiny export buffer to guarantee ~zero import. |
+| Proportional Gain (Kp) | 0.8 | Correction strength. Higher = faster, but too high oscillates. |
+| Derivative Gain (Kd) | 0.2 | Damping of overshoot/noise. |
+| Deadband | 30 W | Ignore grid errors smaller than this (prevents jitter). |
+| Minimum SOC | 11 % | Batteries won't discharge below this. |
+
+**Sensors**
+| Entity | Description |
+|---|---|
+| Status | `normal`, `hold`, `safe`, `degraded`, `disabled`, or `error` (see below). Attributes include per-battery setpoints and safety details. |
+| Grid Power Seen | The grid value the controller is acting on. |
+| Total Battery Command | Sum of commanded battery power (+ = discharge). |
+| Target Grid Power | The active target. |
+
+### Status values
+
+| Status | Meaning |
+|---|---|
+| `normal` | Dispatching normally; all setpoints acknowledged. |
+| `hold` | No fresh grid reading or no healthy batteries this tick — holding (setpoints persist via `cd_time`). |
+| `degraded` | Dispatched, but a battery didn't acknowledge this tick (e.g. a dropped UDP packet). Self-recovers. |
+| `safe` | Grid sensor stale or repeated failures → batteries actively released to `Auto`. |
+| `disabled` | Zero-Grid Control switch is off. |
+
+### Safety & robustness
+
+- **Grid staleness guard** — if the grid sensor stops updating, the manager enters `safe` and
+  releases the batteries.
+- **Per-battery health** — an unreachable battery is excluded from dispatch (the others pick up
+  the slack) and automatically re-included when it recovers.
+- **Watchdog** — repeated bad cycles drop the system to `safe`.
+- **Auto-revert** — `cd_time` ensures batteries idle within seconds if the loop ever stops entirely.
+
+### Tuning tips
+
+- Want zero import even with spiky loads? Make **Target Grid Power** slightly more negative (e.g. −100 W).
+- Seeing oscillation? Lower **Kp** or widen the **Deadband**.
+- Slow to react to load changes? Raise **Kp** a little.
+- Protect battery lifetime? Raise **Minimum SOC**.
 
 ##  2. <a name='Installation'></a>Installation
 
@@ -652,6 +756,14 @@ Run a specific test script:
 python tests/test_api_functions.py
 python tests/test_discovery.py
 python tests/test_es_get_status.py --ip 192.168.0.225
+```
+
+**Hardware-free unit tests** cover the Energy Manager's control and safety logic (no device or
+Home Assistant needed — pure Python), and run standalone or under pytest:
+
+```bash
+python tests/test_controller.py   # zero-grid PD controller + SOC split
+python tests/test_safety.py       # safety supervisor (staleness, health, watchdog)
 ```
 
 If you want a more detailed guide for the available scripts, see [`tests/README_TESTS.md`](tests/README_TESTS.md).
