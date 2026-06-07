@@ -115,11 +115,14 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         return out
 
     def _read_grid(self) -> tuple[float | None, bool, Any]:
-        """Return (grid_power_w, fresh, sample_ts). + = importing.
+        """Return (grid_power_w, fresh, sample_key). + = importing.
 
-        sample_ts is the entity's last_updated — used to detect a NEW sample so the
-        controller only corrects once per reading (the sensor can update slower than
-        our tick; correcting on a repeated reading double-counts and oscillates).
+        sample_key is the entity's last_changed — i.e. when the VALUE last changed.
+        We correct once per distinct value: the grid entity can update slower than our
+        tick, and correcting on a repeated reading double-counts → overshoot/oscillation.
+        last_changed (not last_updated) is used so a re-publish of the same value
+        (force_update / polling) does NOT look like a new sample.
+        Freshness still uses last_updated (is the entity alive at all).
         """
         state = self.hass.states.get(self.grid_sensor)
         if state is None or state.state in ("unknown", "unavailable", None, ""):
@@ -130,7 +133,7 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             return None, False, None
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
         fresh = age <= MANAGER_GRID_MAX_AGE_S
-        return value, fresh, state.last_updated
+        return value, fresh, state.last_changed
 
     def _read_ev(self, now: float) -> float:
         """EV charger power to EXCLUDE from dispatch (W, >=0).
