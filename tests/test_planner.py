@@ -179,30 +179,61 @@ def test_ev_sustained_loss_holds_never_guesses():
 # ---- degraded debounce + watchdog escalation --------------------------
 def test_degraded_only_after_consecutive_failures():
     p = make(degraded_threshold=3)
-    assert p.record_send(1, sent_ok=False, battery_ids=["b0"])[0] == "normal"
-    assert p.record_send(2, sent_ok=False, battery_ids=["b0"])[0] == "normal"
-    assert p.record_send(3, sent_ok=False, battery_ids=["b0"])[0] == "degraded"
+    assert p.record_send(1, {"b0": False})[0] == "normal"
+    assert p.record_send(2, {"b0": False})[0] == "normal"
+    assert p.record_send(3, {"b0": False})[0] == "degraded"
 
 
 def test_degraded_recovers_on_success():
     p = make(degraded_threshold=2)
-    p.record_send(1, sent_ok=False, battery_ids=["b0"])
-    p.record_send(2, sent_ok=False, battery_ids=["b0"])  # degraded
-    assert p.record_send(3, sent_ok=True, battery_ids=["b0"])[0] == "normal"
+    p.record_send(1, {"b0": False})
+    p.record_send(2, {"b0": False})  # degraded
+    assert p.record_send(3, {"b0": True})[0] == "normal"
 
 
-def test_repeated_send_failures_escalate_to_safe():
+def test_repeated_total_send_failures_escalate_to_safe():
     p = make()
-    for _ in range(3):                      # 3 bad cycles -> watchdog SAFE
-        p.record_send(1, sent_ok=False, battery_ids=["b0"])
+    for _ in range(3):                      # 3 cycles with NO battery reachable -> SAFE
+        p.record_send(1, {"b0": False, "b1": False, "b2": False})
     assert p.plan(ob(100, 500)).state == "safe"
+
+
+def test_partial_send_failure_does_not_trip_safe():
+    # One battery dropping acks must NOT be read as "control lost": as long as at
+    # least one battery is reachable the cycle is healthy and the watchdog stays out
+    # of SAFE (it only flags 'degraded'). This is the contended-radio case.
+    p = make(degraded_threshold=3)
+    for _ in range(10):
+        p.record_send(1, {"b0": True, "b1": False, "b2": True})
+    pl = p.plan(ob(100, 500))
+    assert pl.state == "normal" and pl.action == "send"  # never SAFE
 
 
 def test_successful_send_keeps_normal():
     p = make()
     p.plan(ob(100, 500))                    # send
-    state, _ = p.record_send(100, sent_ok=True, battery_ids=["b0", "b1", "b2"])
+    state, _ = p.record_send(100, {"b0": True, "b1": True, "b2": True})
     assert state == "normal"
+
+
+def test_safe_is_recoverable_when_conditions_heal():
+    # The 11:42 incident: once SAFE, the loop must NOT latch there forever. After the
+    # checkable preconditions are healthy for safe_recover_cycles ticks, it resumes.
+    p = make(safe_recover_cycles=2)
+    for _ in range(3):                       # total comm loss -> SAFE
+        p.record_send(1, {"b0": False, "b1": False, "b2": False})
+    assert p.plan(ob(100, 500)).state == "safe"   # tick1: recover_streak=1
+    assert p.plan(ob(103, 500)).state == "safe"   # tick2: streak=2 -> heals watchdog
+    resumed = p.plan(ob(106, 500))                # tick3: mode NORMAL again
+    assert resumed.state == "normal" and resumed.action == "send"
+
+
+def test_safe_does_not_recover_while_grid_stale():
+    # If the SAFE cause persists (grid never fresh), it must stay SAFE.
+    p = make(safe_recover_cycles=1)
+    p.plan(ob(100, None))                     # no grid -> SAFE
+    for t in range(5):
+        assert p.plan(ob(110 + t, None)).state == "safe"
 
 
 if __name__ == "__main__":

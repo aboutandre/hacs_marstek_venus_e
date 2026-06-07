@@ -202,14 +202,15 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
                 await self._release_batteries()
             elif plan.action == "send":
                 ids = [b for b in plan.setpoints if b in coord_by_id]
-                results = await asyncio.gather(
+                raw = await asyncio.gather(
                     *(self._safe_call(coord_by_id[b].client.set_passive_mode,
                                       plan.setpoints[b], MANAGER_CD_TIME_S) for b in ids),
                     return_exceptions=True,
                 )
-                sent_ok = (all(r is not None and not isinstance(r, Exception) for r in results)
-                           if results else False)
-                state, reason = self.planner.record_send(now, sent_ok, ids)
+                # per-battery ack so a single drop doesn't look like total loss of control
+                results = {b: (r is not None and not isinstance(r, Exception))
+                           for b, r in zip(ids, raw)}
+                state, reason = self.planner.record_send(now, results)
             # "hold" / "idle": nothing to execute
 
             result = self._status(plan, state, reason, now)

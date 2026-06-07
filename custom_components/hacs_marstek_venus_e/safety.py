@@ -54,6 +54,14 @@ class SafetySupervisor:
     def record_cycle(self, ok: bool) -> None:
         self._bad_cycles = 0 if ok else self._bad_cycles + 1
 
+    def reset_cycles(self) -> None:
+        """Clear the bad-cycle counter so SAFE can be left once conditions heal.
+
+        SAFE must be RECOVERABLE: without this, parking in SAFE (which records bad
+        cycles) would latch _bad_cycles above the threshold forever.
+        """
+        self._bad_cycles = 0
+
     # ---- decisions ------------------------------------------------------
     def grid_fresh(self, now: float) -> bool:
         if self._last_grid_ok is None:

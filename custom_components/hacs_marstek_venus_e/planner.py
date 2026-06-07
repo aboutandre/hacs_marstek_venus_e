@@ -69,6 +69,7 @@ class PlannerConfig:
     ev_max_age_s: float = 20.0       # reuse last EV reading up to this long on a blip
     min_soc: float = 11.0
     max_battery_power: int = 2500
+    safe_recover_cycles: int = 3     # consecutive healthy ticks in SAFE before resuming
 
 
 class DispatchPlanner:
@@ -87,6 +88,7 @@ class DispatchPlanner:
         self._last_send_ts = 0.0
         self._last_ev = 0.0
         self._last_ev_ts = -1e9          # "never read" sentinel
+        self._safe_recover_streak = 0    # consecutive healthy ticks while parked in SAFE
 
     # ---- EV exclusion (safety-critical) --------------------------------
     def resolve_ev(self, obs: Observation) -> float | None:
@@ -139,14 +141,26 @@ class DispatchPlanner:
         healthy_ids = [b.id for b in healthy]
 
         # 4) SAFE: stale grid or repeated failures -> actively release, don't dispatch.
+        #    SAFE must be RECOVERABLE. Do NOT record more failures here (that would
+        #    latch us in SAFE forever). Instead, once the checkable preconditions are
+        #    healthy again (fresh grid + at least one reachable battery) for a few
+        #    consecutive ticks, clear the watchdog so the next tick resumes control.
         if self.supervisor.mode(obs.now) is Mode.SAFE:
             self.controller.reset()
-            self.supervisor.record_cycle(ok=False)
+            grid_ok = obs.grid_value is not None and obs.grid_fresh and ev is not None
+            if grid_ok and healthy:
+                self._safe_recover_streak += 1
+                if self._safe_recover_streak >= cfg.safe_recover_cycles:
+                    self.supervisor.reset_cycles()   # heals -> leaves SAFE next tick
+                    self._safe_recover_streak = 0
+            else:
+                self._safe_recover_streak = 0
             reason = ("grid sensor stale/unavailable"
                       if not self.supervisor.grid_fresh(obs.now)
-                      else "repeated control-cycle failures")
+                      else "repeated control-cycle failures (recovering)")
             return self._mk("release", {}, "safe", reason, obs.grid_value, ev or 0.0,
                             healthy_ids)
+        self._safe_recover_streak = 0
 
         # 5) Can't dispatch safely this tick -> HOLD (setpoints persist via cd_time).
         hold_reasons = []
@@ -183,14 +197,22 @@ class DispatchPlanner:
         self._last_send_ts = obs.now
         return self._mk("send", setpoints, "normal", "", obs.grid_value, ev, healthy_ids)
 
-    def record_send(self, now: float, sent_ok: bool, battery_ids: list[str]) -> tuple[str, str]:
-        """Fold in the result of a send. Returns (state, reason) for the status."""
-        for bid in battery_ids:
-            self.supervisor.record_battery(bid, sent_ok)
-        self.supervisor.record_cycle(ok=sent_ok and bool(battery_ids))
-        self._send_fail_streak = 0 if sent_ok else self._send_fail_streak + 1
+    def record_send(self, now: float, results: dict[str, bool]) -> tuple[str, str]:
+        """Fold in per-battery send results ({id: acked}). Returns (state, reason).
+
+        Cycle health (the SAFE watchdog) is based on reaching AT LEAST ONE battery:
+        a single dropped UDP ack on a contended radio must NOT be read as "control
+        lost". Persistently-failing individual batteries are excluded via record_battery.
+        'degraded' is the softer signal: any battery missing its ack.
+        """
+        for bid, ok in results.items():
+            self.supervisor.record_battery(bid, ok)
+        any_ok = any(results.values()) if results else False
+        all_ok = all(results.values()) if results else False
+        self.supervisor.record_cycle(ok=any_ok)   # SAFE only if NONE reachable
+        self._send_fail_streak = 0 if all_ok else self._send_fail_streak + 1
         if self._send_fail_streak >= self.config.degraded_threshold:
-            return "degraded", f"setpoint not acknowledged for {self._send_fail_streak} cycles"
+            return "degraded", f"setpoints not fully acknowledged for {self._send_fail_streak} cycles"
         return "normal", ""
 
     # ---- helper --------------------------------------------------------
