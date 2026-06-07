@@ -82,6 +82,7 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         )
         self.min_soc: float = entry.options.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)
         self._released = False  # whether batteries were released to Auto
+        self._prev_state: str | None = None  # for transition logging
 
     # ---- configuration --------------------------------------------------
     def _opt(self, key: str, default: Any) -> Any:
@@ -166,11 +167,42 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         now = time.monotonic()
         try:
-            return await self._tick(now)
+            result = await self._tick(now)
         except Exception as err:  # noqa: BLE001 - tick must never raise
             _LOGGER.exception("Energy manager tick failed: %s", err)
             self.supervisor.record_cycle(ok=False)
-            return self._status("error", grid=None, command=0, setpoints={})
+            result = self._status("error", grid=None, command=0, setpoints={}, reason=str(err))
+        self._log_transition(result, now)
+        return result
+
+    def _log_transition(self, result: dict[str, Any], now: float) -> None:
+        """Log only when the manager's state CHANGES (avoids per-tick spam)."""
+        state = result.get("state")
+        # Per-tick detail is available at DEBUG for deep diagnosis.
+        _LOGGER.debug(
+            "tick: state=%s grid=%s ev=%s cmd=%s reason=%s safety=%s",
+            state, result.get("grid_power"), result.get("ev_power"),
+            result.get("command_total"), result.get("reason"), result.get("safety"),
+        )
+        if state == self._prev_state:
+            return
+        healthy = [b for b in self.supervisor._battery_fails  # noqa: SLF001
+                   if self.supervisor.battery_healthy(b)] or "all/unknown"
+        msg = ("Energy manager state: %s → %s | reason=%s | grid=%sW ev=%sW cmd=%sW | "
+               "healthy=%s safety=%s")
+        args = (self._prev_state, state, result.get("reason") or "-",
+                result.get("grid_power"), result.get("ev_power"),
+                result.get("command_total"), healthy, result.get("safety"))
+        if state in ("safe", "hold", "degraded", "error"):
+            _LOGGER.warning(msg, *args)
+        else:
+            _LOGGER.info(msg, *args)
+        self._prev_state = state
+
+    def _safe_reason(self, now: float) -> str:
+        if not self.supervisor.grid_fresh(now):
+            return "grid sensor stale/unavailable"
+        return "repeated control-cycle failures"
 
     async def _tick(self, now: float) -> dict[str, Any]:
         # Disabled: release once, then idle.
@@ -179,7 +211,8 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
                 await self._release_batteries()
                 self._released = True
                 self.controller.reset()
-            return self._status("disabled", grid=None, command=0, setpoints={})
+            return self._status("disabled", grid=None, command=0, setpoints={},
+                                reason="Zero-Grid Control switch is off")
         self._released = False
 
         # Grid + EV (the EV load is excluded so batteries cover the house, not the car)
@@ -216,12 +249,21 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             self.controller.reset()
             await self._release_batteries()
             self.supervisor.record_cycle(ok=False)
-            return self._status("safe", grid=grid, command=0, setpoints={})
+            return self._status("safe", grid=grid, command=0, setpoints={},
+                                reason=self._safe_reason(now))
 
         # No fresh grid this tick, or no healthy batteries -> hold (cd_time covers).
         if grid is None or not fresh or not states:
+            reasons = []
+            if grid is None:
+                reasons.append("no grid value")
+            elif not fresh:
+                reasons.append("grid stale this tick")
+            if not states:
+                reasons.append("no healthy batteries")
             self.supervisor.record_cycle(ok=False)
-            return self._status("hold", grid=grid, command=0, setpoints={})
+            return self._status("hold", grid=grid, command=0, setpoints={},
+                                reason=", ".join(reasons))
 
         # NORMAL dispatch — subtract the EV load so the controller drives the HOUSE
         # grid toward target and the car is left to be served by the grid.
@@ -245,11 +287,14 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             grid=grid,
             command=sum(setpoints.values()),
             setpoints=setpoints,
+            reason="" if sent_ok else "a battery did not acknowledge its setpoint",
         )
 
-    def _status(self, state: str, grid, command: int, setpoints: dict[str, int]) -> dict[str, Any]:
+    def _status(self, state: str, grid, command: int, setpoints: dict[str, int],
+                reason: str = "") -> dict[str, Any]:
         return {
             "state": state,
+            "reason": reason,
             "enabled": self.enabled,
             "grid_power": grid,
             "ev_power": self._ev_power,
