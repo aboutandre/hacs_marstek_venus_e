@@ -83,6 +83,8 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         self.min_soc: float = entry.options.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)
         self._released = False  # whether batteries were released to Auto
         self._prev_state: str | None = None  # for transition logging
+        self._last_grid_ts: Any = None       # last grid sample processed (dedup)
+        self._last_setpoints: dict[str, int] = {}  # re-sent on repeated samples
 
     # ---- configuration --------------------------------------------------
     def _opt(self, key: str, default: Any) -> Any:
@@ -112,18 +114,23 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
                 out.append(coord)
         return out
 
-    def _read_grid(self) -> tuple[float | None, bool]:
-        """Return (grid_power_w, fresh). + = importing."""
+    def _read_grid(self) -> tuple[float | None, bool, Any]:
+        """Return (grid_power_w, fresh, sample_ts). + = importing.
+
+        sample_ts is the entity's last_updated — used to detect a NEW sample so the
+        controller only corrects once per reading (the sensor can update slower than
+        our tick; correcting on a repeated reading double-counts and oscillates).
+        """
         state = self.hass.states.get(self.grid_sensor)
         if state is None or state.state in ("unknown", "unavailable", None, ""):
-            return None, False
+            return None, False, None
         try:
             value = float(state.state)
         except (ValueError, TypeError):
-            return None, False
+            return None, False, None
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
         fresh = age <= MANAGER_GRID_MAX_AGE_S
-        return value, fresh
+        return value, fresh, state.last_updated
 
     def _read_ev(self, now: float) -> float:
         """EV charger power to EXCLUDE from dispatch (W, >=0).
@@ -216,7 +223,7 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         self._released = False
 
         # Grid + EV (the EV load is excluded so batteries cover the house, not the car)
-        grid, fresh = self._read_grid()
+        grid, fresh, grid_ts = self._read_grid()
         self.supervisor.record_grid(grid is not None and fresh, now)
         self._ev_power = self._read_ev(now)
 
@@ -265,10 +272,20 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             return self._status("hold", grid=grid, command=0, setpoints={},
                                 reason=", ".join(reasons))
 
-        # NORMAL dispatch — subtract the EV load so the controller drives the HOUSE
-        # grid toward target and the car is left to be served by the grid.
-        effective_grid = grid - self._ev_power
-        setpoints = self.controller.update(grid_power=effective_grid, batteries=states)
+        # NORMAL dispatch. Only RECOMPUTE on a NEW grid sample: the grid entity can
+        # update slower than our tick, and the incremental controller would otherwise
+        # add a full correction for a reading the batteries already responded to ->
+        # double-counting -> overshoot/oscillation. On a repeated sample we just re-send
+        # the last setpoints (keeps cd_time alive) without correcting again.
+        new_sample = grid_ts != self._last_grid_ts
+        if new_sample:
+            # subtract the EV load so the controller drives the HOUSE grid to target
+            effective_grid = grid - self._ev_power
+            setpoints = self.controller.update(grid_power=effective_grid, batteries=states)
+            self._last_setpoints = setpoints
+            self._last_grid_ts = grid_ts
+        else:
+            setpoints = dict(self._last_setpoints)
         results = await asyncio.gather(
             *(
                 self._safe_call(coord_by_id[bid].client.set_passive_mode, sp, MANAGER_CD_TIME_S)
