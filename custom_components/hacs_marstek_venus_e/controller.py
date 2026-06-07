@@ -39,13 +39,19 @@ class BatteryState:
 
 @dataclass
 class ControllerConfig:
-    """Tunable parameters (exposed in HA as number/switch entities)."""
+    """Tunable parameters (exposed in HA as number/switch entities).
+
+    Defaults mirror ffunes's proven values: a GENTLE ramp (max_step_w) and a
+    direction-hysteresis band are what keep the grid from yo-yoing on spikes and
+    flip-flopping charge<->discharge near zero.
+    """
 
     target_grid_w: int = -50   # aim slightly into export to guarantee ~zero import
-    kp: float = 0.8
+    kp: float = 0.65
     kd: float = 0.2
-    deadband_w: int = 30       # ignore tiny grid errors to avoid jitter
-    max_step_w: int = 2500     # max change of total command per tick (ramp limit)
+    deadband_w: int = 40       # ignore tiny grid errors to avoid jitter
+    max_step_w: int = 800      # max change of total command per cycle (gentle ramp)
+    direction_hysteresis_w: int = 60  # must exceed this to FLIP charge<->discharge
 
 
 @dataclass
@@ -55,10 +61,12 @@ class ZeroGridController:
     config: ControllerConfig = field(default_factory=ControllerConfig)
     _command_total: float = 0.0   # last total battery command (W, + = discharge)
     _prev_error: float = 0.0
+    _last_sign: int = 0           # sign of last non-zero output (for direction hysteresis)
 
     def reset(self) -> None:
         self._command_total = 0.0
         self._prev_error = 0.0
+        self._last_sign = 0
 
     def update(self, grid_power: float, batteries: list[BatteryState]) -> dict[str, int]:
         """Compute per-battery setpoints (W, + = discharge) for this tick."""
@@ -87,8 +95,18 @@ class ZeroGridController:
         )
         command = _clamp(command, -charge_cap, discharge_cap)
 
+        # Direction hysteresis: don't FLIP charge<->discharge for small corrections.
+        # If the command would reverse direction vs the last non-zero output and is
+        # below the threshold, hold at 0 (idle) instead of flip-flopping near zero.
+        new_sign = 1 if command > 0 else (-1 if command < 0 else 0)
+        if (self._last_sign != 0 and new_sign != 0 and new_sign != self._last_sign
+                and abs(command) < cfg.direction_hysteresis_w):
+            command = 0.0
+            new_sign = 0
+
         self._command_total = command
         self._prev_error = error
+        self._last_sign = new_sign
 
         return self._split(command, batteries)
 

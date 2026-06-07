@@ -18,8 +18,10 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_DEADBAND_W,
+    CONF_DIRECTION_HYSTERESIS_W,
     CONF_KD,
     CONF_KP,
+    CONF_MAX_STEP_W,
     CONF_MIN_SOC,
     CONF_TARGET_GRID_W,
     DOMAIN,
@@ -50,6 +52,10 @@ NUMBERS: tuple[ManagerNumber, ...] = (
                   "mdi:tune-variant", lambda c: c.controller.config.kd),
     ManagerNumber(CONF_DEADBAND_W, "Deadband", 0, 200, 5, "W",
                   "mdi:arrow-expand-horizontal", lambda c: c.controller.config.deadband_w),
+    ManagerNumber(CONF_MAX_STEP_W, "Max Power Change", 100, 2500, 50, "W",
+                  "mdi:speedometer", lambda c: c.controller.config.max_step_w),
+    ManagerNumber(CONF_DIRECTION_HYSTERESIS_W, "Direction Hysteresis", 0, 300, 10, "W",
+                  "mdi:swap-horizontal", lambda c: c.controller.config.direction_hysteresis_w),
     ManagerNumber(CONF_MIN_SOC, "Minimum SOC", 5, 50, 1, "%",
                   "mdi:battery-low", lambda c: c.min_soc),
 )

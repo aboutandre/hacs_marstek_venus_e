@@ -25,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_DEADBAND_W,
+    CONF_DIRECTION_HYSTERESIS_W,
     CONF_EV_SENSOR,
     CONF_GRID_SENSOR,
     CONF_KD,
@@ -33,6 +34,7 @@ from .const import (
     CONF_MIN_SOC,
     CONF_TARGET_GRID_W,
     DEFAULT_DEADBAND_W,
+    DEFAULT_DIRECTION_HYSTERESIS_W,
     DEFAULT_KD,
     DEFAULT_KP,
     DEFAULT_MAX_BATTERY_POWER,
@@ -97,6 +99,9 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             kd=float(self._opt(CONF_KD, DEFAULT_KD)),
             deadband_w=int(self._opt(CONF_DEADBAND_W, DEFAULT_DEADBAND_W)),
             max_step_w=int(self._opt(CONF_MAX_STEP_W, DEFAULT_MAX_STEP_W)),
+            direction_hysteresis_w=int(
+                self._opt(CONF_DIRECTION_HYSTERESIS_W, DEFAULT_DIRECTION_HYSTERESIS_W)
+            ),
         )
 
     async def async_apply_options(self) -> None:

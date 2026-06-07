@@ -318,14 +318,16 @@ CONF_KD: Final = "kd"
 CONF_DEADBAND_W: Final = "deadband_w"
 CONF_MIN_SOC: Final = "min_soc"
 CONF_MAX_STEP_W: Final = "max_step_w"
+CONF_DIRECTION_HYSTERESIS_W: Final = "direction_hysteresis_w"
 
-# Manager defaults
+# Manager defaults (mirror ffunes's proven values: gentle ramp + direction hysteresis)
 DEFAULT_TARGET_GRID_W: Final = -50
-DEFAULT_KP: Final = 0.8
+DEFAULT_KP: Final = 0.65
 DEFAULT_KD: Final = 0.2
-DEFAULT_DEADBAND_W: Final = 30
+DEFAULT_DEADBAND_W: Final = 40
 DEFAULT_MIN_SOC: Final = 11
-DEFAULT_MAX_STEP_W: Final = 2500
+DEFAULT_MAX_STEP_W: Final = 800
+DEFAULT_DIRECTION_HYSTERESIS_W: Final = 60
 DEFAULT_MAX_BATTERY_POWER: Final = 2500
 
 # Control timing
