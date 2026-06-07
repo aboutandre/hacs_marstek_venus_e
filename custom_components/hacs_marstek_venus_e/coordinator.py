@@ -1,6 +1,7 @@
 """Data update coordinator for Marstek Venus E."""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta, datetime
 from typing import Any
@@ -17,6 +18,8 @@ _LOGGER = logging.getLogger(__name__)
 
 class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
     """Data update coordinator for Marstek Venus E."""
+
+    _instance_count = 0  # class-level: used to stagger per-battery poll phases
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the coordinator.
@@ -58,6 +61,15 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         # cycle and the associated timeouts/log-noise), True = CT present (keep polling).
         self._ct_present: bool | None = None
 
+        # Stagger each battery's poll phase across the interval so the per-device
+        # coordinators don't all hit the radio in the same instant (and collide with
+        # the Energy Manager's setpoint writes) — that burst caused the once-a-minute
+        # ES.GetMode timeouts. Offsets spread ~evenly: 0, interval/3, 2*interval/3, ...
+        idx = MarstekDataUpdateCoordinator._instance_count
+        MarstekDataUpdateCoordinator._instance_count += 1
+        self._poll_stagger_s = round((idx * scan_interval_seconds / 3.0) % scan_interval_seconds, 1)
+        self._refreshes = 0
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from device.
         
@@ -67,6 +79,12 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         Raises:
             UpdateFailed: If data fetch fails
         """
+        # One-time poll-phase stagger (see __init__): after the initial setup refresh,
+        # delay this device's cadence once so the three coordinators desynchronize.
+        self._refreshes += 1
+        if self._refreshes == 2 and self._poll_stagger_s:
+            await asyncio.sleep(self._poll_stagger_s)
+
         try:
             # Get energy system status - this includes all key metrics (every 30 seconds)
             data = await self.client.get_energy_system_status()

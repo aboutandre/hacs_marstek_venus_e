@@ -63,7 +63,7 @@ class MarstekUDPClient:
         
         _LOGGER.debug("Sending request to %s:%d: %s", self.ip_address, self.port, payload)
         
-        max_attempts = 2
+        max_attempts = 3  # UDP is lossy on the shared battery radio; one extra retry
         for attempt in range(1, max_attempts + 1):
             try:
                 loop = asyncio.get_event_loop()
