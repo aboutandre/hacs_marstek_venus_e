@@ -51,3 +51,7 @@ htmlcov/
 secrets.yaml
 
 ha_config
+
+# Debug logs (captured for diagnosis; not for the repo)
+logs/
+*.log

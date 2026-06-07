@@ -336,3 +336,5 @@ MANAGER_CD_TIME_S: Final = 10        # passive setpoint auto-revert (> tick)
 MANAGER_GRID_MAX_AGE_S: Final = 20.0 # grid sample older than this -> SAFE
 MANAGER_BATTERY_FAIL_THRESHOLD: Final = 3
 MANAGER_CYCLE_FAIL_THRESHOLD: Final = 3
+MANAGER_DEGRADED_THRESHOLD: Final = 3  # consecutive missed acks before flagging "degraded"
+MANAGER_RESEND_S: Final = 7.0          # re-arm setpoints only if last send older than this (< cd_time)

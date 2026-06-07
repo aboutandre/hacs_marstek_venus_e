@@ -298,6 +298,13 @@ See the **[Manual Mode Automation Guide](MANUAL_MODE_AUTOMATION_GUIDE.md)** for 
 - `sensor.marstek_venus_e_phase_c_power` - Phase C power (W)
 - `sensor.marstek_venus_e_total_ct_power` - Total CT power (W)
 
+> **No CT clamp? Polling stops automatically.** These sensors come from `EM.GetStatus`
+> (the external CT/energy-meter clamp). At startup the integration probes it once; if no
+> clamp is detected (`ct_state = 0`), it **stops polling `EM.GetStatus`** for that device
+> for the rest of the session — it would only return zeros and just adds network load.
+> CT presence is re-checked on the next restart, so plugging in a clamp later is picked up
+> after a reload/restart.
+
 ####  4.1.5. <a name='System'></a>System
 - `sensor.marstek_venus_e_wifi_signal_strength` - WiFi RSSI (dBm)
 - `sensor.marstek_venus_e_wifi_ssid` - Connected WiFi network

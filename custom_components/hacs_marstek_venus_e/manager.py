@@ -1,14 +1,13 @@
-"""Energy Manager coordinator — zero-grid multi-battery coordination brain.
+"""Energy Manager coordinator — the HA I/O shell around the pure DispatchPlanner.
 
-Drives the proven ZeroGridController + SafetySupervisor inside Home Assistant:
-  - reads the grid power sensor (HA entity) each tick,
-  - reads SOC from the per-battery coordinators,
-  - splits dispatch across batteries by SOC,
-  - sends Passive setpoints (cd_time auto-revert) via each battery's UDP client.
+All decision logic lives in planner.py (pure, unit-tested). This module only:
+  - gathers raw observations from HA (grid sensor, EV sensor, battery coordinators),
+  - asks the planner what to do,
+  - executes the action (release / hold / send) over the Local API,
+  - reports the send result back to the planner and publishes status.
 
-Runs as a DataUpdateCoordinator whose _async_update_data IS the control tick, so
-entities (CoordinatorEntity) get fresh status every tick. It never raises out of the
-tick: any failure is recorded and the system degrades to SAFE (batteries -> Auto).
+Runs as a DataUpdateCoordinator whose _async_update_data IS the control tick. It never
+raises out of the tick: any failure is recorded and the system degrades to SAFE.
 """
 from __future__ import annotations
 
@@ -45,18 +44,21 @@ from .const import (
     MANAGER_BATTERY_FAIL_THRESHOLD,
     MANAGER_CD_TIME_S,
     MANAGER_CYCLE_FAIL_THRESHOLD,
+    MANAGER_DEGRADED_THRESHOLD,
     MANAGER_GRID_MAX_AGE_S,
+    MANAGER_RESEND_S,
     MANAGER_TICK_S,
 )
-from .controller import BatteryState, ControllerConfig, ZeroGridController
+from .controller import ControllerConfig, ZeroGridController
 from .coordinator import MarstekDataUpdateCoordinator
-from .safety import Mode, SafetyConfig, SafetySupervisor
+from .planner import BatteryReading, DispatchPlanner, Observation, Plan, PlannerConfig
+from .safety import SafetyConfig, SafetySupervisor
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class EnergyManagerCoordinator(DataUpdateCoordinator):
-    """Zero-grid coordination brain."""
+    """Zero-grid coordination brain (HA I/O shell)."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
@@ -66,13 +68,11 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=MANAGER_TICK_S),
         )
         self.entry = entry
-        self.grid_sensor: str = entry.data[CONF_GRID_SENSOR]
+        # grid sensor: option override (repointable via options flow) else original data value
+        self.grid_sensor: str = entry.options.get(CONF_GRID_SENSOR) or entry.data[CONF_GRID_SENSOR]
         self.ev_sensor: str | None = entry.options.get(CONF_EV_SENSOR) or None
         self.enabled: bool = entry.options.get("enabled", True)
-        # Cache of last good EV reading (fails toward "exclude" = safe: never dump battery into the car)
-        self._last_ev_power: float = 0.0
-        self._last_ev_ts: float = 0.0
-        self._ev_power: float = 0.0  # EV power excluded this tick (for status)
+        self.min_soc: float = float(entry.options.get(CONF_MIN_SOC, DEFAULT_MIN_SOC))
 
         self.controller = ZeroGridController(self._build_controller_config())
         self.supervisor = SafetySupervisor(
@@ -82,11 +82,9 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
                 cycle_fail_threshold=MANAGER_CYCLE_FAIL_THRESHOLD,
             )
         )
-        self.min_soc: float = entry.options.get(CONF_MIN_SOC, DEFAULT_MIN_SOC)
-        self._released = False  # whether batteries were released to Auto
+        self.planner = DispatchPlanner(self.controller, self.supervisor,
+                                       self._build_planner_config())
         self._prev_state: str | None = None  # for transition logging
-        self._last_grid_ts: Any = None       # last grid sample processed (dedup)
-        self._last_setpoints: dict[str, int] = {}  # re-sent on repeated samples
 
     # ---- configuration --------------------------------------------------
     def _opt(self, key: str, default: Any) -> Any:
@@ -104,30 +102,51 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             ),
         )
 
+    def _build_planner_config(self) -> PlannerConfig:
+        return PlannerConfig(
+            cd_time=MANAGER_CD_TIME_S,
+            resend_s=MANAGER_RESEND_S,
+            degraded_threshold=MANAGER_DEGRADED_THRESHOLD,
+            ev_max_age_s=MANAGER_GRID_MAX_AGE_S,
+            min_soc=self.min_soc,
+            max_battery_power=DEFAULT_MAX_BATTERY_POWER,
+        )
+
     async def async_apply_options(self) -> None:
-        """Re-read options into the live controller (called after a setting changes)."""
-        self.controller.config = self._build_controller_config()
+        """Re-read options into the live controller/planner (after a setting changes)."""
         self.min_soc = float(self._opt(CONF_MIN_SOC, DEFAULT_MIN_SOC))
+        self.grid_sensor = self.entry.options.get(CONF_GRID_SENSOR) or self.entry.data[CONF_GRID_SENSOR]
         self.ev_sensor = self.entry.options.get(CONF_EV_SENSOR) or None
         self.enabled = self.entry.options.get("enabled", True)
+        self.controller.config = self._build_controller_config()
+        self.planner.config = self._build_planner_config()
 
-    # ---- battery access -------------------------------------------------
+    # ---- HA I/O (gathering observations) -------------------------------
     def _battery_coordinators(self) -> list[MarstekDataUpdateCoordinator]:
-        out: list[MarstekDataUpdateCoordinator] = []
-        for coord in self.hass.data.get(DOMAIN, {}).values():
-            if isinstance(coord, MarstekDataUpdateCoordinator):
-                out.append(coord)
-        return out
+        return [c for c in self.hass.data.get(DOMAIN, {}).values()
+                if isinstance(c, MarstekDataUpdateCoordinator)]
+
+    def _battery_readings(self) -> tuple[list[BatteryReading], dict[str, MarstekDataUpdateCoordinator]]:
+        readings: list[BatteryReading] = []
+        coord_by_id: dict[str, MarstekDataUpdateCoordinator] = {}
+        for coord in self._battery_coordinators():
+            bid = coord.entry.data.get("ip_address", coord.entry.entry_id)
+            ok = bool(coord.last_update_success) and isinstance(coord.data, dict)
+            soc = coord.data.get("bat_soc") if ok else None
+            power = int(coord.data.get("ongrid_power") or 0) if ok else 0
+            readings.append(BatteryReading(
+                id=bid, soc=soc, power=power, read_ok=ok,
+                min_soc=self.min_soc, max_power=DEFAULT_MAX_BATTERY_POWER,
+            ))
+            coord_by_id[bid] = coord
+        return readings, coord_by_id
 
     def _read_grid(self) -> tuple[float | None, bool, Any]:
         """Return (grid_power_w, fresh, sample_key). + = importing.
 
-        sample_key is the entity's last_changed — i.e. when the VALUE last changed.
-        We correct once per distinct value: the grid entity can update slower than our
-        tick, and correcting on a repeated reading double-counts → overshoot/oscillation.
-        last_changed (not last_updated) is used so a re-publish of the same value
-        (force_update / polling) does NOT look like a new sample.
-        Freshness still uses last_updated (is the entity alive at all).
+        sample_key = entity last_changed (changes only when the VALUE changes) so a
+        re-published identical value isn't treated as a new sample (avoids double-counting
+        a repeated reading -> overshoot). Freshness uses last_updated (is it alive).
         """
         state = self.hass.states.get(self.grid_sensor)
         if state is None or state.state in ("unknown", "unavailable", None, ""):
@@ -137,37 +156,24 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         except (ValueError, TypeError):
             return None, False, None
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
-        fresh = age <= MANAGER_GRID_MAX_AGE_S
-        return value, fresh, state.last_changed
+        return value, age <= MANAGER_GRID_MAX_AGE_S, state.last_changed
 
-    def _read_ev(self, now: float) -> float:
-        """EV charger power to EXCLUDE from dispatch (W, >=0).
-
-        Fails safe: if the EV sensor is configured but unreadable, keep using the last
-        good value for a short window (so a sensor blip never drops the exclusion and
-        dumps battery into the car). After that window, fall back to 0.
-        """
+    def _read_ev_raw(self) -> float | None:
+        """Raw EV charger power, or None if unconfigured/unreadable (planner handles caching)."""
         if not self.ev_sensor:
-            return 0.0
+            return None
         state = self.hass.states.get(self.ev_sensor)
-        if state is not None and state.state not in ("unknown", "unavailable", None, ""):
-            try:
-                value = max(0.0, float(state.state))  # charging is a load; ignore sign noise
-                self._last_ev_power = value
-                self._last_ev_ts = now
-                return value
-            except (ValueError, TypeError):
-                pass
-        # Unreadable: reuse last good value if recent, else assume no EV.
-        if now - self._last_ev_ts <= MANAGER_GRID_MAX_AGE_S:
-            return self._last_ev_power
-        return 0.0
+        if state is None or state.state in ("unknown", "unavailable", None, ""):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
 
     async def _release_batteries(self) -> None:
         """Hand all batteries back to their own Auto mode (safe idle)."""
-        coords = self._battery_coordinators()
         await asyncio.gather(
-            *(self._safe_call(c.client.set_mode, "Auto") for c in coords),
+            *(self._safe_call(c.client.set_mode, "Auto") for c in self._battery_coordinators()),
             return_exceptions=True,
         )
 
@@ -182,18 +188,65 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         now = time.monotonic()
         try:
-            result = await self._tick(now)
+            readings, coord_by_id = self._battery_readings()
+            grid, fresh, key = self._read_grid()
+            obs = Observation(
+                now=now, enabled=self.enabled, grid_value=grid, grid_fresh=fresh,
+                grid_key=key, ev_configured=self.ev_sensor is not None,
+                ev_raw=self._read_ev_raw(), batteries=readings,
+            )
+            plan = self.planner.plan(obs)
+            state, reason = plan.state, plan.reason
+
+            if plan.action == "release":
+                await self._release_batteries()
+            elif plan.action == "send":
+                ids = [b for b in plan.setpoints if b in coord_by_id]
+                results = await asyncio.gather(
+                    *(self._safe_call(coord_by_id[b].client.set_passive_mode,
+                                      plan.setpoints[b], MANAGER_CD_TIME_S) for b in ids),
+                    return_exceptions=True,
+                )
+                sent_ok = (all(r is not None and not isinstance(r, Exception) for r in results)
+                           if results else False)
+                state, reason = self.planner.record_send(now, sent_ok, ids)
+            # "hold" / "idle": nothing to execute
+
+            result = self._status(plan, state, reason, now)
         except Exception as err:  # noqa: BLE001 - tick must never raise
             _LOGGER.exception("Energy manager tick failed: %s", err)
             self.supervisor.record_cycle(ok=False)
-            result = self._status("error", grid=None, command=0, setpoints={}, reason=str(err))
+            result = self._error_status(str(err), now)
+
         self._log_transition(result, now)
         return result
+
+    def _status(self, plan: Plan, state: str, reason: str, now: float) -> dict[str, Any]:
+        return {
+            "state": state,
+            "reason": reason,
+            "enabled": self.enabled,
+            "grid_power": plan.grid,
+            "ev_power": plan.ev_power,
+            "effective_grid": (plan.grid - plan.ev_power) if plan.grid is not None else None,
+            "command_total": plan.command_total,
+            "setpoints": plan.setpoints,
+            "safety": self.supervisor.status(now),
+            "target_grid_w": self.controller.config.target_grid_w,
+        }
+
+    def _error_status(self, err: str, now: float) -> dict[str, Any]:
+        return {
+            "state": "error", "reason": err, "enabled": self.enabled,
+            "grid_power": None, "ev_power": 0.0, "effective_grid": None,
+            "command_total": 0, "setpoints": {},
+            "safety": self.supervisor.status(now),
+            "target_grid_w": self.controller.config.target_grid_w,
+        }
 
     def _log_transition(self, result: dict[str, Any], now: float) -> None:
         """Log only when the manager's state CHANGES (avoids per-tick spam)."""
         state = result.get("state")
-        # Per-tick detail is available at DEBUG for deep diagnosis.
         _LOGGER.debug(
             "tick: state=%s grid=%s ev=%s cmd=%s reason=%s safety=%s",
             state, result.get("grid_power"), result.get("ev_power"),
@@ -201,131 +254,12 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         )
         if state == self._prev_state:
             return
-        healthy = [b for b in self.supervisor._battery_fails  # noqa: SLF001
-                   if self.supervisor.battery_healthy(b)] or "all/unknown"
-        msg = ("Energy manager state: %s → %s | reason=%s | grid=%sW ev=%sW cmd=%sW | "
-               "healthy=%s safety=%s")
+        msg = ("Energy manager state: %s → %s | reason=%s | grid=%sW ev=%sW cmd=%sW | safety=%s")
         args = (self._prev_state, state, result.get("reason") or "-",
                 result.get("grid_power"), result.get("ev_power"),
-                result.get("command_total"), healthy, result.get("safety"))
+                result.get("command_total"), result.get("safety"))
         if state in ("safe", "hold", "degraded", "error"):
             _LOGGER.warning(msg, *args)
         else:
             _LOGGER.info(msg, *args)
         self._prev_state = state
-
-    def _safe_reason(self, now: float) -> str:
-        if not self.supervisor.grid_fresh(now):
-            return "grid sensor stale/unavailable"
-        return "repeated control-cycle failures"
-
-    async def _tick(self, now: float) -> dict[str, Any]:
-        # Disabled: release once, then idle.
-        if not self.enabled:
-            if not self._released:
-                await self._release_batteries()
-                self._released = True
-                self.controller.reset()
-            return self._status("disabled", grid=None, command=0, setpoints={},
-                                reason="Zero-Grid Control switch is off")
-        self._released = False
-
-        # Grid + EV (the EV load is excluded so batteries cover the house, not the car)
-        grid, fresh, grid_ts = self._read_grid()
-        self.supervisor.record_grid(grid is not None and fresh, now)
-        self._ev_power = self._read_ev(now)
-
-        # Batteries
-        states: list[BatteryState] = []
-        coord_by_id: dict[str, MarstekDataUpdateCoordinator] = {}
-        for coord in self._battery_coordinators():
-            bid = coord.entry.data.get("ip_address", coord.entry.entry_id)
-            ok = bool(coord.last_update_success) and isinstance(coord.data, dict)
-            self.supervisor.record_battery(bid, ok)
-            if ok and self.supervisor.battery_healthy(bid):
-                soc = coord.data.get("bat_soc")
-                if soc is None:
-                    continue
-                coord_by_id[bid] = coord
-                states.append(
-                    BatteryState(
-                        id=bid,
-                        soc=float(soc),
-                        power=int(coord.data.get("ongrid_power") or 0),
-                        min_soc=self.min_soc,
-                        max_power=DEFAULT_MAX_BATTERY_POWER,
-                    )
-                )
-
-        mode = self.supervisor.mode(now)
-
-        # SAFE: actively release, don't dispatch blind.
-        if mode is Mode.SAFE:
-            self.controller.reset()
-            await self._release_batteries()
-            self.supervisor.record_cycle(ok=False)
-            return self._status("safe", grid=grid, command=0, setpoints={},
-                                reason=self._safe_reason(now))
-
-        # No fresh grid this tick, or no healthy batteries -> hold (cd_time covers).
-        if grid is None or not fresh or not states:
-            reasons = []
-            if grid is None:
-                reasons.append("no grid value")
-            elif not fresh:
-                reasons.append("grid stale this tick")
-            if not states:
-                reasons.append("no healthy batteries")
-            self.supervisor.record_cycle(ok=False)
-            return self._status("hold", grid=grid, command=0, setpoints={},
-                                reason=", ".join(reasons))
-
-        # NORMAL dispatch. Only RECOMPUTE on a NEW grid sample: the grid entity can
-        # update slower than our tick, and the incremental controller would otherwise
-        # add a full correction for a reading the batteries already responded to ->
-        # double-counting -> overshoot/oscillation. On a repeated sample we just re-send
-        # the last setpoints (keeps cd_time alive) without correcting again.
-        new_sample = grid_ts != self._last_grid_ts
-        if new_sample:
-            # subtract the EV load so the controller drives the HOUSE grid to target
-            effective_grid = grid - self._ev_power
-            setpoints = self.controller.update(grid_power=effective_grid, batteries=states)
-            self._last_setpoints = setpoints
-            self._last_grid_ts = grid_ts
-        else:
-            setpoints = dict(self._last_setpoints)
-        results = await asyncio.gather(
-            *(
-                self._safe_call(coord_by_id[bid].client.set_passive_mode, sp, MANAGER_CD_TIME_S)
-                for bid, sp in setpoints.items()
-                if bid in coord_by_id
-            ),
-            return_exceptions=True,
-        )
-        sent_ok = all(r is not None and not isinstance(r, Exception) for r in results) if results else False
-        for bid in setpoints:
-            self.supervisor.record_battery(bid, sent_ok)
-        self.supervisor.record_cycle(ok=sent_ok and bool(states))
-
-        return self._status(
-            "normal" if sent_ok else "degraded",
-            grid=grid,
-            command=sum(setpoints.values()),
-            setpoints=setpoints,
-            reason="" if sent_ok else "a battery did not acknowledge its setpoint",
-        )
-
-    def _status(self, state: str, grid, command: int, setpoints: dict[str, int],
-                reason: str = "") -> dict[str, Any]:
-        return {
-            "state": state,
-            "reason": reason,
-            "enabled": self.enabled,
-            "grid_power": grid,
-            "ev_power": self._ev_power,
-            "effective_grid": (grid - self._ev_power) if grid is not None else None,
-            "command_total": command,
-            "setpoints": setpoints,
-            "safety": self.supervisor.status(time.monotonic()),
-            "target_grid_w": self.controller.config.target_grid_w,
-        }

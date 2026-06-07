@@ -375,9 +375,12 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
     async def async_step_manager_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure the Energy Manager (e.g. the EV charger sensor to exclude)."""
+        """Configure the Energy Manager (grid sensor + EV charger sensor to exclude)."""
         if user_input is not None:
             new_options = {**self._config_entry.options}
+            grid = user_input.get(CONF_GRID_SENSOR)
+            if grid:
+                new_options[CONF_GRID_SENSOR] = grid  # repoint without recreating the entry
             ev = user_input.get(CONF_EV_SENSOR)
             if ev:
                 new_options[CONF_EV_SENSOR] = ev
@@ -385,9 +388,19 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
                 new_options.pop(CONF_EV_SENSOR, None)  # cleared => no exclusion
             return self.async_create_entry(title="", data=new_options)
 
+        # Effective current grid sensor: option override (if any) else the original data value.
+        current_grid = self._config_entry.options.get(
+            CONF_GRID_SENSOR, self._config_entry.data.get(CONF_GRID_SENSOR, "")
+        )
         current_ev = self._config_entry.options.get(CONF_EV_SENSOR, "")
         schema = vol.Schema(
             {
+                vol.Optional(
+                    CONF_GRID_SENSOR,
+                    description={"suggested_value": current_grid} if current_grid else {},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor", device_class="power")
+                ),
                 vol.Optional(
                     CONF_EV_SENSOR,
                     description={"suggested_value": current_ev} if current_ev else {},
@@ -400,8 +413,9 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
             step_id="manager_options",
             data_schema=schema,
             description_placeholders={
-                "info": "Optional: select your EV charger power sensor. Its load is "
-                "excluded so the batteries cover the house, not the car. Leave empty to disable."
+                "info": "Grid sensor: positive = importing (point this at your fast 1s "
+                "Shelly sensor for tighter control). EV sensor (optional): its load is "
+                "excluded so the batteries cover the house, not the car."
             },
         )
     

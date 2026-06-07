@@ -53,6 +53,10 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         # Track last battery data update (every 60 minutes instead of 30 seconds)
         self._last_battery_update: datetime | None = None
         self._battery_update_interval = timedelta(minutes=60)
+        # CT (energy-meter) presence. None = unknown (keep probing), False = no CT
+        # detected at startup (stop polling EM.GetStatus — saves a wasted request per
+        # cycle and the associated timeouts/log-noise), True = CT present (keep polling).
+        self._ct_present: bool | None = None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from device.
@@ -96,31 +100,48 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning("Failed to get mode data: %s", mode_err)
                 # Don't fail the entire update if mode fetch fails
             
-            # Also try to get EM status for additional meter data
-            try:
-                em_data = await self.client.get_energy_meter_status()
-                # Merge EM data into mode_data if available
-                if em_data:
-                    # Apply scaling for EM energy values too
-                    if "input_energy" in em_data:
-                        em_data["input_energy"] = round(em_data.get("input_energy", 0) * 0.1, 1)
-                    if "output_energy" in em_data:
-                        em_data["output_energy"] = round(em_data.get("output_energy", 0) * 0.1, 1)
-                    
-                    # Merge with mode_data
-                    # For CT power data (a_power, b_power, c_power, total_power), prefer EM.GetStatus
-                    # as ES.GetMode may return zeros if CT is not in active mode
-                    if self.mode_data:
-                        ct_fields = {"a_power", "b_power", "c_power", "total_power"}
-                        for k, v in em_data.items():
-                            # Prefer EM data for CT fields, otherwise prefer mode_data
-                            if k not in self.mode_data or (k in ct_fields and self.mode_data.get(k) == 0):
-                                self.mode_data[k] = v
-                    else:
-                        self.mode_data = em_data
-            except Exception as em_err:
-                _LOGGER.debug("Failed to get EM status (expected if not available): %s", em_err)
-                # EM.GetStatus is optional and may not be available on all devices
+            # Also try to get EM (energy-meter / CT clamp) status — but ONLY if a CT
+            # might be present. If we detected no CT at startup (ct_state == 0), skip the
+            # call entirely: it returns all-zeros anyway and just wastes a request/cycle
+            # (and occasionally times out). CT presence can't change at runtime, so this
+            # is a one-time determination.
+            if self._ct_present is not False:
+                try:
+                    em_data = await self.client.get_energy_meter_status()
+                    # Merge EM data into mode_data if available
+                    if em_data:
+                        # One-time CT detection: ct_state 0 => no clamp => stop polling EM.
+                        ct_state = em_data.get("ct_state")
+                        if self._ct_present is None and ct_state is not None:
+                            if ct_state == 0:
+                                self._ct_present = False
+                                _LOGGER.info(
+                                    "No CT meter detected (ct_state=0); will stop polling "
+                                    "EM.GetStatus for this device to reduce load."
+                                )
+                            else:
+                                self._ct_present = True
+
+                        # Apply scaling for EM energy values too
+                        if "input_energy" in em_data:
+                            em_data["input_energy"] = round(em_data.get("input_energy", 0) * 0.1, 1)
+                        if "output_energy" in em_data:
+                            em_data["output_energy"] = round(em_data.get("output_energy", 0) * 0.1, 1)
+
+                        # Merge with mode_data
+                        # For CT power data (a_power, b_power, c_power, total_power), prefer EM.GetStatus
+                        # as ES.GetMode may return zeros if CT is not in active mode
+                        if self.mode_data:
+                            ct_fields = {"a_power", "b_power", "c_power", "total_power"}
+                            for k, v in em_data.items():
+                                # Prefer EM data for CT fields, otherwise prefer mode_data
+                                if k not in self.mode_data or (k in ct_fields and self.mode_data.get(k) == 0):
+                                    self.mode_data[k] = v
+                        else:
+                            self.mode_data = em_data
+                except Exception as em_err:
+                    # Timeout/unreachable: leave CT presence unknown and retry next cycle.
+                    _LOGGER.debug("Failed to get EM status (expected if not available): %s", em_err)
             
             return data
         except Exception as err:
