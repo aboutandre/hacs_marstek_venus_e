@@ -29,6 +29,7 @@ from .const import (
     CONF_GRID_SENSOR,
     CONF_KD,
     CONF_KP,
+    CONF_MAX_BATTERY_SOC,
     CONF_MAX_STEP_W,
     CONF_MIN_SOC,
     CONF_TARGET_GRID_W,
@@ -37,6 +38,7 @@ from .const import (
     DEFAULT_KD,
     DEFAULT_KP,
     DEFAULT_MAX_BATTERY_POWER,
+    DEFAULT_MAX_BATTERY_SOC,
     DEFAULT_MAX_STEP_W,
     DEFAULT_MIN_SOC,
     DEFAULT_TARGET_GRID_W,
@@ -73,6 +75,7 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         self.ev_sensor: str | None = entry.options.get(CONF_EV_SENSOR) or None
         self.enabled: bool = entry.options.get("enabled", True)
         self.min_soc: float = float(entry.options.get(CONF_MIN_SOC, DEFAULT_MIN_SOC))
+        self.max_battery_soc: float = float(entry.options.get(CONF_MAX_BATTERY_SOC, DEFAULT_MAX_BATTERY_SOC))
 
         self.controller = ZeroGridController(self._build_controller_config())
         self.supervisor = SafetySupervisor(
@@ -109,12 +112,14 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             degraded_threshold=MANAGER_DEGRADED_THRESHOLD,
             ev_max_age_s=MANAGER_GRID_MAX_AGE_S,
             min_soc=self.min_soc,
+            max_battery_soc=self.max_battery_soc,
             max_battery_power=DEFAULT_MAX_BATTERY_POWER,
         )
 
     async def async_apply_options(self) -> None:
         """Re-read options into the live controller/planner (after a setting changes)."""
         self.min_soc = float(self._opt(CONF_MIN_SOC, DEFAULT_MIN_SOC))
+        self.max_battery_soc = float(self._opt(CONF_MAX_BATTERY_SOC, DEFAULT_MAX_BATTERY_SOC))
         self.grid_sensor = self.entry.options.get(CONF_GRID_SENSOR) or self.entry.data[CONF_GRID_SENSOR]
         self.ev_sensor = self.entry.options.get(CONF_EV_SENSOR) or None
         self.enabled = self.entry.options.get("enabled", True)

@@ -68,6 +68,7 @@ class PlannerConfig:
     degraded_threshold: int = 3
     ev_max_age_s: float = 20.0       # reuse last EV reading up to this long on a blip
     min_soc: float = 11.0
+    max_battery_soc: float = 100.0   # stop charging above this SOC (per-battery)
     max_battery_power: int = 2500
     safe_recover_cycles: int = 3     # consecutive healthy ticks in SAFE before resuming
 
@@ -136,7 +137,8 @@ class DispatchPlanner:
             if b.read_ok and b.soc is not None and self.supervisor.battery_healthy(b.id):
                 healthy.append(BatteryState(
                     id=b.id, soc=float(b.soc), power=int(b.power),
-                    min_soc=cfg.min_soc, max_power=cfg.max_battery_power,
+                    min_soc=cfg.min_soc, max_soc=cfg.max_battery_soc,
+                    max_power=cfg.max_battery_power,
                 ))
         healthy_ids = [b.id for b in healthy]
 

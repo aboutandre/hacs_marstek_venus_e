@@ -22,6 +22,7 @@ from .const import (
     CONF_DIRECTION_HYSTERESIS_W,
     CONF_KD,
     CONF_KP,
+    CONF_MAX_BATTERY_SOC,
     CONF_MAX_STEP_W,
     CONF_MIN_SOC,
     CONF_PHASE_DOWN_W,
@@ -29,6 +30,7 @@ from .const import (
     CONF_RESERVE_SOC,
     CONF_TARGET_GRID_W,
     DEFAULT_CHEAP_PRICE_THRESHOLD,
+    DEFAULT_MAX_BATTERY_SOC,
     DEFAULT_PHASE_DOWN_W,
     DEFAULT_PHASE_UP_W,
     DEFAULT_RESERVE_SOC,
@@ -92,6 +94,8 @@ NUMBERS: tuple[ManagerNumber, ...] = (
                   "mdi:swap-horizontal", lambda c: c.controller.config.direction_hysteresis_w),
     ManagerNumber(CONF_MIN_SOC, "Minimum SOC", 5, 50, 1, "%",
                   "mdi:battery-low", lambda c: c.min_soc),
+    ManagerNumber(CONF_MAX_BATTERY_SOC, "Maximum Charge SOC", 50, 100, 1, "%",
+                  "mdi:battery-high", lambda c: c.max_battery_soc),
 )
 
 
