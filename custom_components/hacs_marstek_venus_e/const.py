@@ -338,3 +338,26 @@ MANAGER_BATTERY_FAIL_THRESHOLD: Final = 3
 MANAGER_CYCLE_FAIL_THRESHOLD: Final = 3
 MANAGER_DEGRADED_THRESHOLD: Final = 3  # consecutive missed acks before flagging "degraded"
 MANAGER_RESEND_S: Final = 7.0          # re-arm setpoints only if last send older than this (< cd_time)
+
+# ---------------------------------------------------------------------------
+# EV Coordinator (go-e local-API control, wraps EvChargePlanner)
+# ---------------------------------------------------------------------------
+CONF_GOE_IP: Final = "goe_ip"
+CONF_EV_MODE: Final = "ev_mode"
+CONF_RESERVE_SOC: Final = "reserve_soc"
+CONF_CHEAP_PRICE_THRESHOLD: Final = "cheap_price_threshold"
+CONF_CHEAP_TARGET: Final = "cheap_target"
+CONF_TIBBER_SENSOR: Final = "tibber_sensor"
+CONF_CAR_STATE_SENSOR: Final = "car_state_sensor"
+CONF_PHASE_UP_W: Final = "phase_up_w"
+CONF_PHASE_DOWN_W: Final = "phase_down_w"
+
+DEFAULT_RESERVE_SOC: Final = 80.0
+DEFAULT_CHEAP_PRICE_THRESHOLD: Final = 0.10
+DEFAULT_EV_MODE: Final = "solar"
+DEFAULT_CHEAP_TARGET: Final = "car"
+DEFAULT_PHASE_UP_W: Final = 4500.0
+DEFAULT_PHASE_DOWN_W: Final = 4140.0
+
+EV_TICK_S: Final = 15.0
+EV_GOE_TIMEOUT_S: Final = 5.0

@@ -17,15 +17,24 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_CHEAP_PRICE_THRESHOLD,
     CONF_DEADBAND_W,
     CONF_DIRECTION_HYSTERESIS_W,
     CONF_KD,
     CONF_KP,
     CONF_MAX_STEP_W,
     CONF_MIN_SOC,
+    CONF_PHASE_DOWN_W,
+    CONF_PHASE_UP_W,
+    CONF_RESERVE_SOC,
     CONF_TARGET_GRID_W,
+    DEFAULT_CHEAP_PRICE_THRESHOLD,
+    DEFAULT_PHASE_DOWN_W,
+    DEFAULT_PHASE_UP_W,
+    DEFAULT_RESERVE_SOC,
     DOMAIN,
 )
+from .ev_coordinator import EvCoordinator
 from .manager import EnergyManagerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +50,31 @@ class ManagerNumber:
     unit: str | None
     icon: str
     getter: Callable[[EnergyManagerCoordinator], float]
+
+
+@dataclass(frozen=True)
+class EvNumberDesc:
+    """Descriptor for an EV coordinator tuning number."""
+    key: str
+    name: str
+    min: float
+    max: float
+    step: float
+    unit: str | None
+    icon: str
+    default: float
+
+
+EV_NUMBERS: tuple[EvNumberDesc, ...] = (
+    EvNumberDesc(CONF_RESERVE_SOC, "EV Reserve SOC", 5, 100, 1, "%",
+                 "mdi:battery-charging-80", DEFAULT_RESERVE_SOC),
+    EvNumberDesc(CONF_CHEAP_PRICE_THRESHOLD, "EV Cheap Price", 0.0, 0.5, 0.01,
+                 "EUR/kWh", "mdi:cash-clock", DEFAULT_CHEAP_PRICE_THRESHOLD),
+    EvNumberDesc(CONF_PHASE_UP_W, "EV Phase Up Threshold", 1000, 8000, 100, "W",
+                 "mdi:lightning-bolt-circle", DEFAULT_PHASE_UP_W),
+    EvNumberDesc(CONF_PHASE_DOWN_W, "EV Phase Down Threshold", 1000, 8000, 100, "W",
+                 "mdi:lightning-bolt-outline", DEFAULT_PHASE_DOWN_W),
+)
 
 
 NUMBERS: tuple[ManagerNumber, ...] = (
@@ -66,11 +100,15 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Energy Manager number entities."""
+    """Set up Energy Manager and EV number entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     if not isinstance(coordinator, EnergyManagerCoordinator):
         return
-    async_add_entities(MarstekManagerNumber(coordinator, entry, d) for d in NUMBERS)
+    entities: list = [MarstekManagerNumber(coordinator, entry, d) for d in NUMBERS]
+    ev_coord: EvCoordinator | None = hass.data[DOMAIN].get(entry.entry_id + "_ev")
+    if ev_coord is not None:
+        entities.extend(EvNumberEntity(ev_coord, entry, d) for d in EV_NUMBERS)
+    async_add_entities(entities)
 
 
 class MarstekManagerNumber(CoordinatorEntity, NumberEntity):
@@ -107,6 +145,50 @@ class MarstekManagerNumber(CoordinatorEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         # Persist to options; the manager's options-update listener applies it live.
+        new_options = {**self.coordinator.entry.options, self._desc.key: value}
+        self.hass.config_entries.async_update_entry(
+            self.coordinator.entry, options=new_options
+        )
+        await self.coordinator.async_request_refresh()
+
+
+class EvNumberEntity(CoordinatorEntity, NumberEntity):
+    """A tunable EV charging parameter."""
+
+    _attr_has_entity_name = True
+    _attr_mode = NumberMode.BOX
+
+    def __init__(
+        self,
+        coordinator: EvCoordinator,
+        entry: ConfigEntry,
+        desc: EvNumberDesc,
+    ) -> None:
+        super().__init__(coordinator)
+        self._desc = desc
+        self._attr_unique_id = f"{entry.entry_id}_ev_{desc.key}"
+        self._attr_name = desc.name
+        self._attr_native_min_value = desc.min
+        self._attr_native_max_value = desc.max
+        self._attr_native_step = desc.step
+        self._attr_native_unit_of_measurement = desc.unit
+        self._attr_icon = desc.icon
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, entry.entry_id + "_ev")},
+            "name": f"{entry.title} EV",
+            "manufacturer": "go-e",
+            "model": "EV Charger",
+            "via_device": (DOMAIN, entry.entry_id),
+        }
+
+    @property
+    def native_value(self) -> float:
+        return float(self.coordinator.entry.options.get(
+            self._desc.key,
+            self.coordinator.entry.data.get(self._desc.key, self._desc.default),
+        ))
+
+    async def async_set_native_value(self, value: float) -> None:
         new_options = {**self.coordinator.entry.options, self._desc.key: value}
         self.hass.config_entries.async_update_entry(
             self.coordinator.entry, options=new_options

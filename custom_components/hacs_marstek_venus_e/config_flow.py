@@ -13,11 +13,14 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_BLE_MAC,
+    CONF_CAR_STATE_SENSOR,
     CONF_ENTRY_TYPE,
     CONF_EV_SENSOR,
+    CONF_GOE_IP,
     CONF_GRID_SENSOR,
     CONF_TIMEOUT,
     CONF_SCAN_INTERVAL,
+    CONF_TIBBER_SENSOR,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     ENTRY_TYPE_MANAGER,
@@ -375,24 +378,42 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
     async def async_step_manager_options(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Configure the Energy Manager (grid sensor + EV charger sensor to exclude)."""
+        """Configure the Energy Manager (sensors, go-e EV charger)."""
         if user_input is not None:
             new_options = {**self._config_entry.options}
             grid = user_input.get(CONF_GRID_SENSOR)
             if grid:
-                new_options[CONF_GRID_SENSOR] = grid  # repoint without recreating the entry
+                new_options[CONF_GRID_SENSOR] = grid
             ev = user_input.get(CONF_EV_SENSOR)
             if ev:
                 new_options[CONF_EV_SENSOR] = ev
             else:
-                new_options.pop(CONF_EV_SENSOR, None)  # cleared => no exclusion
+                new_options.pop(CONF_EV_SENSOR, None)
+            goe = user_input.get(CONF_GOE_IP, "").strip()
+            if goe:
+                new_options[CONF_GOE_IP] = goe
+            else:
+                new_options.pop(CONF_GOE_IP, None)
+            tibber = user_input.get(CONF_TIBBER_SENSOR)
+            if tibber:
+                new_options[CONF_TIBBER_SENSOR] = tibber
+            else:
+                new_options.pop(CONF_TIBBER_SENSOR, None)
+            car = user_input.get(CONF_CAR_STATE_SENSOR)
+            if car:
+                new_options[CONF_CAR_STATE_SENSOR] = car
+            else:
+                new_options.pop(CONF_CAR_STATE_SENSOR, None)
             return self.async_create_entry(title="", data=new_options)
 
-        # Effective current grid sensor: option override (if any) else the original data value.
         current_grid = self._config_entry.options.get(
             CONF_GRID_SENSOR, self._config_entry.data.get(CONF_GRID_SENSOR, "")
         )
         current_ev = self._config_entry.options.get(CONF_EV_SENSOR, "")
+        current_goe = self._config_entry.options.get(CONF_GOE_IP, "")
+        current_tibber = self._config_entry.options.get(CONF_TIBBER_SENSOR, "")
+        current_car = self._config_entry.options.get(CONF_CAR_STATE_SENSOR, "")
+
         schema = vol.Schema(
             {
                 vol.Optional(
@@ -407,15 +428,34 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
                 ): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor", device_class="power")
                 ),
+                vol.Optional(
+                    CONF_GOE_IP,
+                    description={"suggested_value": current_goe} if current_goe else {},
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                ),
+                vol.Optional(
+                    CONF_TIBBER_SENSOR,
+                    description={"suggested_value": current_tibber} if current_tibber else {},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(
+                    CONF_CAR_STATE_SENSOR,
+                    description={"suggested_value": current_car} if current_car else {},
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
             }
         )
         return self.async_show_form(
             step_id="manager_options",
             data_schema=schema,
             description_placeholders={
-                "info": "Grid sensor: positive = importing (point this at your fast 1s "
-                "Shelly sensor for tighter control). EV sensor (optional): its load is "
-                "excluded so the batteries cover the house, not the car."
+                "info": "Grid sensor: positive = importing. "
+                "EV power sensor: subtracted from grid (batteries cover house, grid covers car). "
+                "go-e IP: leave blank to disable EV control. "
+                "Tibber sensor + car-state sensor: needed for solar/cheap EV charging."
             },
         )
     

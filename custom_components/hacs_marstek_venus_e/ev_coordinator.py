@@ -1,0 +1,236 @@
+"""EV charge coordinator — HA I/O shell around EvChargePlanner.
+
+All decision logic lives in ev_planner.py (pure, unit-tested). This module only:
+  - gathers raw observations from HA (grid sensor, EV power sensor, battery coordinators,
+    Tibber price, car state),
+  - asks the planner what to do,
+  - executes the action via the go-e local HTTP API,
+  - publishes status for HA sensor entities.
+
+Runs as a DataUpdateCoordinator. The tick never raises: any failure is recorded and
+the last plan is left in place (go-e remembers its last frc/amp/psm across ticks).
+
+If go-e IP is not configured the coordinator runs silently without sending any commands.
+"""
+from __future__ import annotations
+
+import logging
+import time
+from datetime import timedelta
+from typing import Any
+
+import aiohttp
+
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+
+from .const import (
+    CONF_CAR_STATE_SENSOR,
+    CONF_CHEAP_PRICE_THRESHOLD,
+    CONF_CHEAP_TARGET,
+    CONF_EV_MODE,
+    CONF_EV_SENSOR,
+    CONF_GOE_IP,
+    CONF_GRID_SENSOR,
+    CONF_PHASE_DOWN_W,
+    CONF_PHASE_UP_W,
+    CONF_RESERVE_SOC,
+    CONF_TIBBER_SENSOR,
+    DEFAULT_CHEAP_PRICE_THRESHOLD,
+    DEFAULT_CHEAP_TARGET,
+    DEFAULT_EV_MODE,
+    DEFAULT_PHASE_DOWN_W,
+    DEFAULT_PHASE_UP_W,
+    DEFAULT_RESERVE_SOC,
+    DOMAIN,
+    EV_GOE_TIMEOUT_S,
+    EV_TICK_S,
+)
+from .coordinator import MarstekDataUpdateCoordinator
+from .ev_planner import EvChargePlanner, EvMode, EvObservation, EvPlan, EvPlannerConfig
+
+_LOGGER = logging.getLogger(__name__)
+
+
+class EvCoordinator(DataUpdateCoordinator):
+    """EV charge control brain (HA I/O shell around EvChargePlanner)."""
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=f"{DOMAIN}_ev",
+            update_interval=timedelta(seconds=EV_TICK_S),
+        )
+        self.entry = entry
+        self._planner = EvChargePlanner()
+        self._last_plan: EvPlan | None = None
+        self._last_amp: int = 6
+        self._last_phases: int = 1
+        self._apply_config()
+
+    # ---- configuration --------------------------------------------------
+
+    def _opt(self, key: str, default: Any) -> Any:
+        return self.entry.options.get(key, self.entry.data.get(key, default))
+
+    def _apply_config(self) -> None:
+        self._goe_ip: str | None = self._opt(CONF_GOE_IP, None) or None
+        self._ev_mode: str = self._opt(CONF_EV_MODE, DEFAULT_EV_MODE)
+        self._cheap_target: str = self._opt(CONF_CHEAP_TARGET, DEFAULT_CHEAP_TARGET)
+        self._grid_sensor: str | None = self._opt(CONF_GRID_SENSOR, None)
+        self._ev_sensor: str | None = self._opt(CONF_EV_SENSOR, None)
+        self._tibber_sensor: str | None = self._opt(CONF_TIBBER_SENSOR, None)
+        self._car_state_sensor: str | None = self._opt(CONF_CAR_STATE_SENSOR, None)
+        self._planner.config = EvPlannerConfig(
+            reserve_soc=float(self._opt(CONF_RESERVE_SOC, DEFAULT_RESERVE_SOC)),
+            cheap_price=float(self._opt(CONF_CHEAP_PRICE_THRESHOLD, DEFAULT_CHEAP_PRICE_THRESHOLD)),
+            phase_up_w=float(self._opt(CONF_PHASE_UP_W, DEFAULT_PHASE_UP_W)),
+            phase_down_w=float(self._opt(CONF_PHASE_DOWN_W, DEFAULT_PHASE_DOWN_W)),
+        )
+
+    async def async_apply_options(self) -> None:
+        """Re-read options into the live planner config (after a setting changes)."""
+        self._apply_config()
+
+    # ---- HA entity reads ------------------------------------------------
+
+    def _battery_coordinators(self) -> list[MarstekDataUpdateCoordinator]:
+        return [c for c in self.hass.data.get(DOMAIN, {}).values()
+                if isinstance(c, MarstekDataUpdateCoordinator)]
+
+    def _read_fleet_soc(self) -> float | None:
+        """Return the minimum SOC across all batteries, or None if no battery data."""
+        socs = [
+            float(coord.data["bat_soc"])
+            for coord in self._battery_coordinators()
+            if coord.last_update_success
+            and isinstance(coord.data, dict)
+            and coord.data.get("bat_soc") is not None
+        ]
+        return min(socs) if socs else None
+
+    def _read_sensor_float(self, entity_id: str | None) -> float | None:
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in ("unknown", "unavailable", ""):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
+
+    def _read_car_state(self) -> tuple[bool, bool]:
+        """Return (connected, done) from the configured car-state entity."""
+        if not self._car_state_sensor:
+            return False, False
+        state = self.hass.states.get(self._car_state_sensor)
+        if state is None or state.state in ("unknown", "unavailable", ""):
+            return False, False
+        return _parse_car_state(state.state)
+
+    # ---- go-e control ---------------------------------------------------
+
+    async def _apply_plan(self, plan: EvPlan) -> None:
+        if not self._goe_ip:
+            return
+        prev = self._last_plan
+        if (
+            prev is not None
+            and prev.charge == plan.charge
+            and prev.amp == plan.amp
+            and prev.phases == plan.phases
+        ):
+            return  # no change — don't hammer the charger
+
+        frc = "2" if plan.charge else "1"
+        params: dict[str, str] = {"frc": frc}
+        if plan.charge:
+            params["amp"] = str(plan.amp)
+            params["psm"] = "1" if plan.phases == 1 else "2"
+
+        try:
+            session = async_get_clientsession(self.hass)
+            url = f"http://{self._goe_ip}/api/set"
+            timeout = aiohttp.ClientTimeout(total=EV_GOE_TIMEOUT_S)
+            async with session.get(url, params=params, timeout=timeout) as resp:
+                if resp.status != 200:
+                    _LOGGER.warning("go-e returned HTTP %s for %s", resp.status, params)
+                    return
+            _LOGGER.debug("go-e set: frc=%s amp=%s psm=%s", frc,
+                          params.get("amp", "-"), params.get("psm", "-"))
+            self._last_amp = plan.amp
+            self._last_phases = plan.phases
+            self._last_plan = plan
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.warning("go-e command failed (%s): %s", params, err)
+
+    # ---- control tick ---------------------------------------------------
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        now = time.monotonic()
+        try:
+            connected, done = self._read_car_state()
+            try:
+                mode = EvMode(self._ev_mode)
+            except ValueError:
+                mode = EvMode.OFF
+
+            obs = EvObservation(
+                now=now,
+                mode=mode,
+                grid_w=self._read_sensor_float(self._grid_sensor),
+                car_power_w=self._read_sensor_float(self._ev_sensor) or 0.0,
+                battery_soc=self._read_fleet_soc(),
+                price=self._read_sensor_float(self._tibber_sensor),
+                cheap_target=self._cheap_target,
+                car_connected=connected,
+                car_done=done,
+                max_amp=16,
+                cur_amp=self._last_amp,
+                cur_phases=self._last_phases,
+            )
+            plan = self._planner.plan(obs)
+            await self._apply_plan(plan)
+            return {
+                "state": plan.state,
+                "reason": plan.reason,
+                "charge": plan.charge,
+                "amp": plan.amp if plan.charge else 0,
+                "phases": plan.phases,
+                "target_power_w": plan.target_power_w,
+                "car_connected": connected,
+                "car_done": done,
+                "battery_soc": obs.battery_soc,
+                "grid_w": obs.grid_w,
+                "price": obs.price,
+                "ev_mode": self._ev_mode,
+                "goe_configured": bool(self._goe_ip),
+            }
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("EV coordinator tick failed: %s", err)
+            return {
+                "state": "error", "reason": str(err), "charge": False,
+                "amp": 0, "phases": self._last_phases, "target_power_w": 0,
+                "car_connected": False, "car_done": False,
+                "battery_soc": None, "grid_w": None, "price": None,
+                "ev_mode": self._ev_mode, "goe_configured": bool(self._goe_ip),
+            }
+
+
+def _parse_car_state(value: str) -> tuple[bool, bool]:
+    """Interpret a go-e car-state entity value → (connected, done).
+
+    go-e API v2 `car` field: 1=Idle/no-car, 2=Charging, 3=Connected/waiting, 4=Finished.
+    The ha-goecharger-api2 integration may expose these as numeric strings or descriptive text.
+    """
+    v = value.strip().lower()
+    if v in ("1", "idle", "no car", "no_car"):
+        return False, False
+    if v in ("4", "finished", "complete", "done", "charged", "full"):
+        return True, True
+    # 2=charging, 3=connected/waiting, or any other non-idle state
+    return True, False
