@@ -353,6 +353,8 @@ CONF_TIBBER_SENSOR: Final = "tibber_sensor"
 CONF_CAR_STATE_SENSOR: Final = "car_state_sensor"
 CONF_PHASE_UP_W: Final = "phase_up_w"
 CONF_PHASE_DOWN_W: Final = "phase_down_w"
+CONF_BRIDGE_GRACE_S: Final = "bridge_grace_s"      # how long batteries bridge the car after surplus drops
+CONF_BRIDGE_FLOOR_SOC: Final = "bridge_floor_soc"  # stop bridging once fleet SOC falls to this
 
 DEFAULT_RESERVE_SOC: Final = 80.0
 DEFAULT_CHEAP_PRICE_THRESHOLD: Final = 0.10
@@ -360,6 +362,8 @@ DEFAULT_EV_MODE: Final = "solar"
 DEFAULT_CHEAP_TARGET: Final = "car"
 DEFAULT_PHASE_UP_W: Final = 4500.0
 DEFAULT_PHASE_DOWN_W: Final = 4140.0
+DEFAULT_BRIDGE_GRACE_S: Final = 180.0
+DEFAULT_BRIDGE_FLOOR_SOC: Final = 50.0
 
 EV_TICK_S: Final = 15.0
 EV_GOE_TIMEOUT_S: Final = 5.0

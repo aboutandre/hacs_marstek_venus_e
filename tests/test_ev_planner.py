@@ -146,18 +146,67 @@ def test_restart_blocked_by_min_pause():
     assert again.charge is False and again.state == "hold"
 
 
-def test_min_on_time_holds_through_dip():
-    p = mk(min_charge_s=120)
+def test_min_on_time_holds_when_bridge_unavailable():
+    # below the bridge floor, a soft dip within min on-time still rides briefly on grid
+    # (no battery bridge, no hard import) -> the legacy "hold" path
+    p = mk(bridge_floor_soc=50, min_charge_s=120, import_stop_w=400)
     p.plan(ob(now=10000, soc=90, grid=-6000))            # charging
-    dip = p.plan(ob(now=10030, soc=60, grid=-100))       # below reserve 30s later, not importing
-    assert dip.charge is True and dip.amp == 6 and dip.state == "hold"
+    hold = p.plan(ob(now=10030, soc=45, grid=-50))       # below floor, gentle dip, 30s in
+    assert hold.charge is True and hold.state == "hold" and not hold.bridge_active
 
 
-def test_hard_import_overrides_min_on_time():
-    p = mk(min_charge_s=120, import_stop_w=400)
+# ---- battery bridge ---------------------------------------------------
+def test_bridge_holds_through_dip():
+    # surplus drops while charging -> batteries bridge the car instead of importing
+    p = mk(bridge_grace_s=180, bridge_floor_soc=50)
     p.plan(ob(now=10000, soc=90, grid=-6000))            # charging
-    stop = p.plan(ob(now=10030, soc=60, grid=1500))      # importing 1500 W -> stop now
-    assert stop.charge is False
+    dip = p.plan(ob(now=10030, soc=60, grid=-100))       # surplus gone 30s later
+    assert dip.charge is True and dip.amp == 6 and dip.state == "bridge" and dip.bridge_active
+
+
+def test_bridge_charges_even_when_importing():
+    # the trigger moment IS an import (that's why surplus dropped); bridge anyway so the
+    # battery manager can pick up the car next tick
+    p = mk(bridge_grace_s=180, bridge_floor_soc=50, import_stop_w=400)
+    p.plan(ob(now=10000, soc=90, grid=-6000))            # charging
+    b = p.plan(ob(now=10030, soc=85, grid=1500))         # importing 1500 W
+    assert b.charge is True and b.state == "bridge" and b.bridge_active
+
+
+def test_bridge_not_when_not_charging():
+    # never STARTS a bridge if we weren't already charging
+    p = mk(bridge_grace_s=180, bridge_floor_soc=50)
+    out = p.plan(ob(now=10000, soc=90, grid=-100))       # insufficient surplus, idle
+    assert out.charge is False and out.state == "waiting" and not out.bridge_active
+
+
+def test_bridge_stops_below_floor():
+    # once fleet SOC reaches the bridge floor, stop instead of draining further
+    p = mk(bridge_grace_s=180, bridge_floor_soc=50, import_stop_w=400)
+    p.plan(ob(now=10000, soc=90, grid=-6000))            # charging
+    stop = p.plan(ob(now=10030, soc=45, grid=1500))      # below floor + importing -> stop
+    assert stop.charge is False and not stop.bridge_active
+
+
+def test_bridge_expires_after_grace():
+    p = mk(bridge_grace_s=120, bridge_floor_soc=50, min_charge_s=120, import_stop_w=400)
+    p.plan(ob(now=10000, soc=90, grid=-6000))            # charging, start ts=10000
+    b = p.plan(ob(now=10030, soc=85, grid=-100))         # bridge starts, dropped_at=10030
+    assert b.state == "bridge"
+    done = p.plan(ob(now=10200, soc=82, grid=-100))      # 170s after drop > grace 120
+    assert done.charge is False and not done.bridge_active
+
+
+def test_bridge_recovers_and_resets_timer():
+    p = mk(bridge_grace_s=180, bridge_floor_soc=50)
+    p.plan(ob(now=10000, soc=90, grid=-6000))            # charging
+    b = p.plan(ob(now=10030, soc=85, grid=-100))         # bridge, dropped_at=10030
+    assert b.bridge_active
+    rec = p.plan(ob(now=10060, soc=85, grid=-6000))      # surplus back -> normal solar
+    assert rec.state == "solar" and rec.charge and not rec.bridge_active
+    # a fresh dip much later still gets a full grace window (timer was reset)
+    again = p.plan(ob(now=10400, soc=85, grid=-100))
+    assert again.state == "bridge" and again.bridge_active
 
 
 if __name__ == "__main__":
