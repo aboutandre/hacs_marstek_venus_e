@@ -6,7 +6,7 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.const import ATTR_AREA_ID, ATTR_DEVICE_ID, ATTR_ENTITY_ID
-from homeassistant.core import HomeAssistant, ServiceCall, callback
+from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -47,18 +47,19 @@ def _battery_coordinators(
 @callback
 def _target_battery_coordinators(
     hass: HomeAssistant, call: ServiceCall
-) -> list[MarstekDataUpdateCoordinator]:
-    """Resolve a service call's target to battery coordinators.
+) -> dict[str, MarstekDataUpdateCoordinator]:
+    """Resolve a service call's target to battery coordinators, keyed by entry_id.
 
     If the call carries no target (entity/device/area/...), fall back to every
     battery — preserving the original broadcast behavior so existing untargeted
     calls keep working. Otherwise map the referenced entities/devices to their
     config entries and return only the matching battery coordinators. This lets
-    an external brain dispatch per-battery setpoints via device targeting.
+    an external brain dispatch per-battery setpoints via device targeting, and
+    read back a per-battery result (the entry_id keys).
     """
     batteries = _battery_coordinators(hass)
     if not any(call.data.get(key) for key in _TARGET_FIELD_KEYS):
-        return list(batteries.values())
+        return dict(batteries)
 
     ent_reg = er.async_get(hass)
     dev_reg = dr.async_get(hass)
@@ -92,7 +93,7 @@ def _target_battery_coordinators(
             if entity.config_entry_id:
                 entry_ids.add(entity.config_entry_id)
 
-    return [batteries[eid] for eid in entry_ids if eid in batteries]
+    return {eid: batteries[eid] for eid in entry_ids if eid in batteries}
 
 # Service schemas
 SERVICE_SET_MODE_SCHEMA = vol.Schema(
@@ -223,20 +224,27 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         hass: Home Assistant instance
     """
 
-    async def set_mode_handler(call: ServiceCall) -> None:
+    async def set_mode_handler(call: ServiceCall) -> dict[str, Any]:
         """Handle set_mode service call.
-        
+
+        Returns a per-battery result keyed by config entry_id so an external
+        caller (e.g. Wattsmith) can tell which batteries acked.
+
         Args:
             call: Service call object
         """
         mode = call.data.get("mode")
 
-        for coordinator in _target_battery_coordinators(hass, call):
+        results: dict[str, Any] = {}
+        for entry_id, coordinator in _target_battery_coordinators(hass, call).items():
             try:
                 await coordinator.set_mode(mode)
+                results[entry_id] = {"ok": True}
                 _LOGGER.info("Set mode to %s on %s", mode, coordinator.client.ip_address)
             except Exception as err:
+                results[entry_id] = {"ok": False, "error": str(err)}
                 _LOGGER.error("Error setting mode: %s", err)
+        return {"results": results}
 
     async def set_manual_schedule_handler(call: ServiceCall) -> None:
         """Handle set_manual_schedule service call.
@@ -276,18 +284,24 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             except Exception as err:
                 _LOGGER.error("Error setting manual schedule: %s", err)
 
-    async def set_passive_mode_handler(call: ServiceCall) -> None:
+    async def set_passive_mode_handler(call: ServiceCall) -> dict[str, Any]:
         """Handle set_passive_mode service call.
-        
+
+        Returns a per-battery result keyed by config entry_id so an external
+        caller (e.g. Wattsmith) can record which batteries acked the setpoint
+        (UDP can silently drop) and flag "degraded" on repeated misses.
+
         Args:
             call: Service call object
         """
         power = call.data.get("power")
         cd_time = call.data.get("cd_time", 0)
 
-        for coordinator in _target_battery_coordinators(hass, call):
+        results: dict[str, Any] = {}
+        for entry_id, coordinator in _target_battery_coordinators(hass, call).items():
             try:
                 await coordinator.set_passive_mode(power=power, cd_time=cd_time)
+                results[entry_id] = {"ok": True}
                 _LOGGER.info(
                     "Set passive mode: power=%s, cd_time=%s on %s",
                     power,
@@ -295,14 +309,18 @@ async def async_setup_services(hass: HomeAssistant) -> None:
                     coordinator.client.ip_address,
                 )
             except Exception as err:
+                results[entry_id] = {"ok": False, "error": str(err)}
                 _LOGGER.error("Error setting passive mode: %s", err)
+        return {"results": results}
 
-    # Register services
+    # Register services. set_mode/set_passive_mode return an optional per-battery
+    # response (SupportsResponse.OPTIONAL) — callers may ignore it.
     hass.services.async_register(
         DOMAIN,
         "set_mode",
         set_mode_handler,
         schema=SERVICE_SET_MODE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     hass.services.async_register(
@@ -317,6 +335,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         "set_passive_mode",
         set_passive_mode_handler,
         schema=SERVICE_SET_PASSIVE_MODE_SCHEMA,
+        supports_response=SupportsResponse.OPTIONAL,
     )
 
     async def clear_all_schedules_handler(call: ServiceCall) -> None:
