@@ -280,11 +280,14 @@ def _parse_car_state(value: str) -> tuple[bool, bool]:
 
     go-e API v2 `car` field: 1=Idle/no-car, 2=Charging, 3=Connected/waiting, 4=Finished.
     The ha-goecharger-api2 integration may expose these as numeric strings or descriptive text.
+
+    car=4 (Finished) means the *previous* charge session ended — the car is still physically
+    connected. We treat it as connected-but-not-done so the planner can restart charging via
+    frc=2 when PV surplus is available. The car's own BMS refuses additional power if it is
+    genuinely full, so sending frc=2 is safe.
     """
     v = value.strip().lower()
     if v in ("1", "idle", "no car", "no_car"):
         return False, False
-    if v in ("4", "finished", "complete", "done", "charged", "full"):
-        return True, True
-    # 2=charging, 3=connected/waiting, or any other non-idle state
+    # 2=charging, 3=connected/waiting, 4=finished (previous session), or any other non-idle
     return True, False
