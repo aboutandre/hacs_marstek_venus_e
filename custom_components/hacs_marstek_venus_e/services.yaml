@@ -1,6 +1,12 @@
 set_mode:
   name: Set Operating Mode
-  description: Change the operating mode of the Marstek Venus E system
+  description: Change the operating mode of the Marstek Venus E system. Target one or
+    more battery devices; with no target it applies to all batteries.
+  target:
+    entity:
+      integration: hacs_marstek_venus_e
+    device:
+      integration: hacs_marstek_venus_e
   fields:
     mode:
       name: Mode
@@ -84,7 +90,13 @@ set_manual_schedule:
 
 set_passive_mode:
   name: Set Passive Mode
-  description: Set passive mode with a specific power target
+  description: Set passive mode with a specific power target. Target one or more battery
+    devices to send per-battery setpoints; with no target it applies to all batteries.
+  target:
+    entity:
+      integration: hacs_marstek_venus_e
+    device:
+      integration: hacs_marstek_venus_e
   fields:
     power:
       name: Target Power

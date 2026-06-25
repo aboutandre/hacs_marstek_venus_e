@@ -5,8 +5,12 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import ATTR_DEVICE_ID
+from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.service import async_extract_referenced_entity_ids
 
 from .const import (
     DOMAIN,
@@ -15,13 +19,74 @@ from .const import (
     API_SET_PASSIVE_MODE,
     VALID_MODES,
 )
+from .coordinator import MarstekDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# The set of target attribute keys HA recognizes (entity_id/device_id/area_id/
+# floor_id/label_id). Derived from cv.ENTITY_SERVICE_FIELDS so it stays correct
+# across HA versions that add new target types.
+_TARGET_FIELD_KEYS = {key.schema for key in cv.ENTITY_SERVICE_FIELDS}
+
+
+def _battery_coordinators(
+    hass: HomeAssistant,
+) -> dict[str, MarstekDataUpdateCoordinator]:
+    """Return only the real battery device coordinators, keyed by entry_id.
+
+    hass.data[DOMAIN] also holds the Energy Manager and EV coordinators (the
+    latter keyed ``<entry_id>_ev``). Those must never receive battery device
+    commands, so filter by type — mirrors EnergyManagerCoordinator._battery_coordinators.
+    """
+    return {
+        entry_id: coordinator
+        for entry_id, coordinator in hass.data.get(DOMAIN, {}).items()
+        if isinstance(coordinator, MarstekDataUpdateCoordinator)
+    }
+
+
+@callback
+def _target_battery_coordinators(
+    hass: HomeAssistant, call: ServiceCall
+) -> list[MarstekDataUpdateCoordinator]:
+    """Resolve a service call's target to battery coordinators.
+
+    If the call carries no target (entity/device/area/...), fall back to every
+    battery — preserving the original broadcast behavior so existing untargeted
+    calls keep working. Otherwise map the referenced entities/devices to their
+    config entries and return only the matching battery coordinators. This lets
+    an external brain dispatch per-battery setpoints via device targeting.
+    """
+    batteries = _battery_coordinators(hass)
+    if not any(call.data.get(key) for key in _TARGET_FIELD_KEYS):
+        return list(batteries.values())
+
+    entry_ids: set[str] = set()
+
+    # Entities (incl. those indirectly referenced via device/area/floor/label).
+    selected = async_extract_referenced_entity_ids(hass, call)
+    ent_reg = er.async_get(hass)
+    for entity_id in selected.referenced | selected.indirectly_referenced:
+        entity = ent_reg.async_get(entity_id)
+        if entity and entity.config_entry_id:
+            entry_ids.add(entity.config_entry_id)
+
+    # Devices map straight to their config entries — robust even if a device's
+    # entities aren't loaded yet.
+    dev_reg = dr.async_get(hass)
+    for device_id in call.data.get(ATTR_DEVICE_ID) or []:
+        device = dev_reg.async_get(device_id)
+        if device:
+            entry_ids.update(device.config_entries)
+
+    return [batteries[eid] for eid in entry_ids if eid in batteries]
 
 # Service schemas
 SERVICE_SET_MODE_SCHEMA = vol.Schema(
     {
         vol.Required("mode"): vol.In(VALID_MODES),
+        # Optional target (entity/device/area). No target => all batteries.
+        **cv.ENTITY_SERVICE_FIELDS,
     }
 )
 
@@ -41,6 +106,8 @@ SERVICE_SET_PASSIVE_MODE_SCHEMA = vol.Schema(
     {
         vol.Required("power"): vol.Coerce(int),
         vol.Optional("cd_time", default=0): vol.All(vol.Coerce(int), vol.Range(min=0)),
+        # Optional target (entity/device/area). No target => all batteries.
+        **cv.ENTITY_SERVICE_FIELDS,
     }
 )
 
@@ -150,11 +217,11 @@ async def async_setup_services(hass: HomeAssistant) -> None:
             call: Service call object
         """
         mode = call.data.get("mode")
-        
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+
+        for coordinator in _target_battery_coordinators(hass, call):
             try:
                 await coordinator.set_mode(mode)
-                _LOGGER.info("Set mode to %s", mode)
+                _LOGGER.info("Set mode to %s on %s", mode, coordinator.client.ip_address)
             except Exception as err:
                 _LOGGER.error("Error setting mode: %s", err)
 
@@ -175,7 +242,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         # Convert power based on mode: Charging = negative, Discharging = positive
         power = -power_magnitude if mode == "Charging" else power_magnitude
         
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+        for coordinator in _battery_coordinators(hass).values():
             try:
                 await coordinator.set_manual_schedule(
                     time_num=time_num,
@@ -204,11 +271,16 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """
         power = call.data.get("power")
         cd_time = call.data.get("cd_time", 0)
-        
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+
+        for coordinator in _target_battery_coordinators(hass, call):
             try:
                 await coordinator.set_passive_mode(power=power, cd_time=cd_time)
-                _LOGGER.info("Set passive mode: power=%s, cd_time=%s", power, cd_time)
+                _LOGGER.info(
+                    "Set passive mode: power=%s, cd_time=%s on %s",
+                    power,
+                    cd_time,
+                    coordinator.client.ip_address,
+                )
             except Exception as err:
                 _LOGGER.error("Error setting passive mode: %s", err)
 
@@ -240,7 +312,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         Args:
             call: Service call object
         """
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+        for coordinator in _battery_coordinators(hass).values():
             try:
                 results = await coordinator.clear_all_manual_schedules()
                 _LOGGER.info(
@@ -267,7 +339,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """
         enable = call.data.get("enable")
         
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+        for coordinator in _battery_coordinators(hass).values():
             try:
                 await coordinator.client.set_ble_adv(enable)
                 _LOGGER.info("Bluetooth advertising %s", "enabled" if enable else "disabled")
@@ -289,7 +361,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """
         enabled = call.data.get("enabled")
         
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+        for coordinator in _battery_coordinators(hass).values():
             try:
                 await coordinator.client.set_led_ctrl(enabled)
                 _LOGGER.info("Service Call LED: Turning %s for device at %s", "ON" if enabled else "OFF", coordinator.client.ip_address)
@@ -313,7 +385,7 @@ async def async_setup_services(hass: HomeAssistant) -> None:
         """
         mode = call.data.get("mode")
         
-        for entry_id, coordinator in hass.data[DOMAIN].items():
+        for coordinator in _battery_coordinators(hass).values():
             try:
                 # First, set the operating mode
                 await coordinator.set_mode(mode)
