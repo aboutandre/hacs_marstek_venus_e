@@ -453,7 +453,8 @@ class MarstekOptionsFlow(config_entries.OptionsFlow):
             data_schema=schema,
             description_placeholders={
                 "info": "Grid sensor: positive = importing. "
-                "EV power sensor: subtracted from grid (batteries cover house, grid covers car). "
+                "EV power sensor: subtracted from grid (batteries cover house, grid covers car), "
+                "except during a battery bridge (brief PV dip) when the batteries carry the car too. "
                 "go-e IP: leave blank to disable EV control. "
                 "Tibber sensor + car-state sensor: needed for solar/cheap EV charging."
             },

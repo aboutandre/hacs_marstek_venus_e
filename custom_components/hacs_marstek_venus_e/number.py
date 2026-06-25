@@ -17,6 +17,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CONF_BRIDGE_FLOOR_SOC,
+    CONF_BRIDGE_GRACE_S,
     CONF_CHEAP_PRICE_THRESHOLD,
     CONF_DEADBAND_W,
     CONF_DIRECTION_HYSTERESIS_W,
@@ -29,6 +31,8 @@ from .const import (
     CONF_PHASE_UP_W,
     CONF_RESERVE_SOC,
     CONF_TARGET_GRID_W,
+    DEFAULT_BRIDGE_FLOOR_SOC,
+    DEFAULT_BRIDGE_GRACE_S,
     DEFAULT_CHEAP_PRICE_THRESHOLD,
     DEFAULT_MAX_BATTERY_SOC,
     DEFAULT_PHASE_DOWN_W,
@@ -76,6 +80,10 @@ EV_NUMBERS: tuple[EvNumberDesc, ...] = (
                  "mdi:lightning-bolt-circle", DEFAULT_PHASE_UP_W),
     EvNumberDesc(CONF_PHASE_DOWN_W, "EV Phase Down Threshold", 1000, 8000, 100, "W",
                  "mdi:lightning-bolt-outline", DEFAULT_PHASE_DOWN_W),
+    EvNumberDesc(CONF_BRIDGE_GRACE_S, "EV Bridge Grace", 0, 1800, 10, "s",
+                 "mdi:timer-sand", DEFAULT_BRIDGE_GRACE_S),
+    EvNumberDesc(CONF_BRIDGE_FLOOR_SOC, "EV Bridge Floor SOC", 5, 100, 1, "%",
+                 "mdi:battery-arrow-down", DEFAULT_BRIDGE_FLOOR_SOC),
 )
 
 

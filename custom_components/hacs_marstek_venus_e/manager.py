@@ -163,6 +163,16 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         age = (dt_util.utcnow() - state.last_updated).total_seconds()
         return value, age <= MANAGER_GRID_MAX_AGE_S, state.last_changed
 
+    def _ev_bridging(self) -> bool:
+        """True when the EV coordinator wants the batteries to carry the car this tick.
+
+        During a battery bridge we must NOT exclude the EV load — the whole point is for
+        the home batteries to cover the car through a brief PV-surplus dip instead of
+        importing. The EV coordinator is registered alongside us under "<entry_id>_ev".
+        """
+        ev_coord = self.hass.data.get(DOMAIN, {}).get(self.entry.entry_id + "_ev")
+        return bool(getattr(ev_coord, "bridge_active", False))
+
     def _read_ev_raw(self) -> float | None:
         """Raw EV charger power, or None if unconfigured/unreadable (planner handles caching)."""
         if not self.ev_sensor:
@@ -195,10 +205,12 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
         try:
             readings, coord_by_id = self._battery_readings()
             grid, fresh, key = self._read_grid()
+            bridge = self._ev_bridging()
             obs = Observation(
                 now=now, enabled=self.enabled, grid_value=grid, grid_fresh=fresh,
                 grid_key=key, ev_configured=self.ev_sensor is not None,
-                ev_raw=self._read_ev_raw(), batteries=readings,
+                # bridge: fold the car back into the load the batteries zero out
+                ev_raw=0.0 if bridge else self._read_ev_raw(), batteries=readings,
             )
             plan = self.planner.plan(obs)
             state, reason = plan.state, plan.reason
@@ -219,11 +231,13 @@ class EnergyManagerCoordinator(DataUpdateCoordinator):
             # "hold" / "idle": nothing to execute
 
             result = self._status(plan, state, reason, now)
+            result["ev_bridge"] = bridge
         except Exception as err:  # noqa: BLE001 - tick must never raise
             _LOGGER.exception("Energy manager tick failed: %s", err)
             self.supervisor.record_cycle(ok=False)
             result = self._error_status(str(err), now)
 
+        result.setdefault("ev_bridge", False)
         self._log_transition(result, now)
         return result
 

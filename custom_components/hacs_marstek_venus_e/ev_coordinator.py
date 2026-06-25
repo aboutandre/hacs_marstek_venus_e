@@ -27,6 +27,8 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    CONF_BRIDGE_FLOOR_SOC,
+    CONF_BRIDGE_GRACE_S,
     CONF_CAR_STATE_SENSOR,
     CONF_CHEAP_PRICE_THRESHOLD,
     CONF_CHEAP_TARGET,
@@ -38,6 +40,8 @@ from .const import (
     CONF_PHASE_UP_W,
     CONF_RESERVE_SOC,
     CONF_TIBBER_SENSOR,
+    DEFAULT_BRIDGE_FLOOR_SOC,
+    DEFAULT_BRIDGE_GRACE_S,
     DEFAULT_CHEAP_PRICE_THRESHOLD,
     DEFAULT_CHEAP_TARGET,
     DEFAULT_EV_MODE,
@@ -69,6 +73,9 @@ class EvCoordinator(DataUpdateCoordinator):
         self._last_plan: EvPlan | None = None
         self._last_amp: int = 6
         self._last_phases: int = 1
+        # read by the battery manager each tick: when True it stops excluding the EV
+        # load so the home batteries carry the car through a brief PV-surplus dip.
+        self.bridge_active: bool = False
         self._apply_config()
 
     # ---- configuration --------------------------------------------------
@@ -89,6 +96,8 @@ class EvCoordinator(DataUpdateCoordinator):
             cheap_price=float(self._opt(CONF_CHEAP_PRICE_THRESHOLD, DEFAULT_CHEAP_PRICE_THRESHOLD)),
             phase_up_w=float(self._opt(CONF_PHASE_UP_W, DEFAULT_PHASE_UP_W)),
             phase_down_w=float(self._opt(CONF_PHASE_DOWN_W, DEFAULT_PHASE_DOWN_W)),
+            bridge_grace_s=float(self._opt(CONF_BRIDGE_GRACE_S, DEFAULT_BRIDGE_GRACE_S)),
+            bridge_floor_soc=float(self._opt(CONF_BRIDGE_FLOOR_SOC, DEFAULT_BRIDGE_FLOOR_SOC)),
         )
 
     async def async_apply_options(self) -> None:
@@ -111,6 +120,22 @@ class EvCoordinator(DataUpdateCoordinator):
             and coord.data.get("bat_soc") is not None
         ]
         return min(socs) if socs else None
+
+    def _read_battery_charge_w(self) -> float:
+        """Total power currently being absorbed by home batteries (positive = charging).
+
+        When the battery manager is zeroing the grid, all PV surplus flows into the
+        batteries and grid_w ≈ 0. Without this, the EV coordinator would compute
+        available ≈ 0 and never decide to start the car.
+        ongrid_power sign: + = discharging, - = charging (absorbing PV).
+        """
+        total = 0.0
+        for coord in self._battery_coordinators():
+            if coord.last_update_success and isinstance(coord.data, dict):
+                ongrid = coord.data.get("ongrid_power")
+                if ongrid is not None:
+                    total += max(0.0, -float(ongrid))
+        return total
 
     def _read_sensor_float(self, entity_id: str | None) -> float | None:
         if not entity_id:
@@ -168,6 +193,27 @@ class EvCoordinator(DataUpdateCoordinator):
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("go-e command failed (%s): %s", params, err)
 
+    # ---- state-change logging -------------------------------------------
+
+    _prev_ev_state: str | None = None
+
+    def _log_transition(self, state: str, reason: str, obs: "EvObservation") -> None:
+        """Log only when the EV state changes (avoids per-tick spam)."""
+        _LOGGER.debug(
+            "ev tick: state=%s reason=%s grid=%.0fW bat_charge=%.0fW soc=%s",
+            state, reason, obs.grid_w or 0.0, obs.battery_charge_w,
+            f"{obs.battery_soc:.0f}%" if obs.battery_soc is not None else "?",
+        )
+        if state == self._prev_ev_state:
+            return
+        _LOGGER.info(
+            "EV state: %s → %s | %s | grid=%.0fW bat_charge=%.0fW soc=%s",
+            self._prev_ev_state, state, reason,
+            obs.grid_w or 0.0, obs.battery_charge_w,
+            f"{obs.battery_soc:.0f}%" if obs.battery_soc is not None else "?",
+        )
+        self._prev_ev_state = state
+
     # ---- control tick ---------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -179,6 +225,7 @@ class EvCoordinator(DataUpdateCoordinator):
             except ValueError:
                 mode = EvMode.OFF
 
+            battery_charge_w = self._read_battery_charge_w()
             obs = EvObservation(
                 now=now,
                 mode=mode,
@@ -192,9 +239,12 @@ class EvCoordinator(DataUpdateCoordinator):
                 max_amp=16,
                 cur_amp=self._last_amp,
                 cur_phases=self._last_phases,
+                battery_charge_w=battery_charge_w,
             )
             plan = self._planner.plan(obs)
+            self.bridge_active = plan.bridge_active
             await self._apply_plan(plan)
+            self._log_transition(plan.state, plan.reason, obs)
             return {
                 "state": plan.state,
                 "reason": plan.reason,
@@ -202,9 +252,11 @@ class EvCoordinator(DataUpdateCoordinator):
                 "amp": plan.amp if plan.charge else 0,
                 "phases": plan.phases,
                 "target_power_w": plan.target_power_w,
+                "bridge_active": plan.bridge_active,
                 "car_connected": connected,
                 "car_done": done,
                 "battery_soc": obs.battery_soc,
+                "battery_charge_w": battery_charge_w,
                 "grid_w": obs.grid_w,
                 "price": obs.price,
                 "ev_mode": self._ev_mode,
@@ -212,11 +264,13 @@ class EvCoordinator(DataUpdateCoordinator):
             }
         except Exception as err:  # noqa: BLE001
             _LOGGER.exception("EV coordinator tick failed: %s", err)
+            self.bridge_active = False  # fail safe: don't ask batteries to cover the car
             return {
                 "state": "error", "reason": str(err), "charge": False,
                 "amp": 0, "phases": self._last_phases, "target_power_w": 0,
+                "bridge_active": False,
                 "car_connected": False, "car_done": False,
-                "battery_soc": None, "grid_w": None, "price": None,
+                "battery_soc": None, "battery_charge_w": 0.0, "grid_w": None, "price": None,
                 "ev_mode": self._ev_mode, "goe_configured": bool(self._goe_ip),
             }
 
