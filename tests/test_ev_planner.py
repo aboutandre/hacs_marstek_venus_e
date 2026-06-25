@@ -209,6 +209,53 @@ def test_bridge_recovers_and_resets_timer():
     assert again.state == "bridge" and again.bridge_active
 
 
+# ---- zero-grid startup (battery_charge_w) ----------------------------
+# When the battery manager is zeroing the grid, grid_w ≈ 0 even with lots of solar.
+# The EV planner must use battery_charge_w to see that surplus and start the car.
+
+def ob_zg(battery_charge_w=3000.0, soc=85.0, now=10000.0):
+    """Zero-grid scenario: grid≈0, batteries absorbing all surplus."""
+    return EvObservation(
+        now=now, mode=EvMode.SOLAR, grid_w=0.0, car_power_w=0.0,
+        battery_soc=soc, price=None, cheap_target=TARGET_BOTH,
+        car_connected=True, car_done=False, max_amp=16, cur_amp=0, cur_phases=1,
+        battery_charge_w=battery_charge_w,
+    )
+
+
+def test_zerogrid_starts_car_when_batteries_above_reserve():
+    # batteries at 85% (> 80% reserve), absorbing 3000W → car should start
+    p = mk(reserve_soc=80.0)
+    plan = p.plan(ob_zg(battery_charge_w=3000.0, soc=85.0))
+    assert plan.charge is True and plan.state == "solar", (
+        f"expected solar charge, got {plan.state}: {plan.reason}"
+    )
+
+
+def test_zerogrid_waits_when_batteries_below_reserve():
+    # batteries at 60% (< 80% reserve): surplus should refill batteries first
+    p = mk(reserve_soc=80.0)
+    plan = p.plan(ob_zg(battery_charge_w=3000.0, soc=60.0))
+    assert plan.charge is False and plan.state == "waiting", (
+        f"expected waiting, got {plan.state}: {plan.reason}"
+    )
+
+
+def test_zerogrid_insufficient_surplus_stays_off():
+    # only 500W absorbed by batteries: below 1-phase 6A minimum (1380W)
+    p = mk(reserve_soc=80.0)
+    plan = p.plan(ob_zg(battery_charge_w=500.0, soc=90.0))
+    assert plan.charge is False
+
+
+def test_zerogrid_amp_computed_from_available():
+    # 2300W available (all battery absorption, grid=0): should get 6A on 1-phase (10A)
+    p = mk(reserve_soc=80.0)
+    plan = p.plan(ob_zg(battery_charge_w=2300.0, soc=90.0))
+    assert plan.charge is True and plan.phases == 1
+    assert plan.amp == min(16, max(6, round(2300 / 230))), plan.amp  # ~10A
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

@@ -79,6 +79,12 @@ class EvObservation:
     max_amp: int = 16
     cur_amp: int = 0
     cur_phases: int = 3
+    # When the battery manager is running in zero-grid mode it absorbs all PV surplus so
+    # grid_w ≈ 0 even when there is plenty of solar. The raw grid reading alone would make
+    # available ≈ 0 and the car would never start. Adding battery_charge_w (total power
+    # currently being absorbed by home batteries, positive when charging) makes available
+    # equal to true PV surplus: available = car + battery_absorbing + grid_export.
+    battery_charge_w: float = 0.0
 
 
 @dataclass
@@ -133,8 +139,9 @@ class EvChargePlanner:
         if obs.battery_soc is None or obs.grid_w is None:
             return self._maybe_stop(obs, "waiting", "battery/grid data unavailable")
 
-        # Power the car could take without importing = its current draw + current export.
-        available = obs.car_power_w - obs.grid_w - cfg.ev_margin_w
+        # Power the car could take without importing = its current draw + grid export +
+        # power currently absorbed by home batteries (which can be redirected to the car).
+        available = obs.car_power_w - obs.grid_w + obs.battery_charge_w - cfg.ev_margin_w
         phases = self._decide_phases(available, obs.now)
         min_power = cfg.min_amp * phases * cfg.phase_voltage
 

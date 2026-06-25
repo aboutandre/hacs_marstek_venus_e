@@ -121,6 +121,22 @@ class EvCoordinator(DataUpdateCoordinator):
         ]
         return min(socs) if socs else None
 
+    def _read_battery_charge_w(self) -> float:
+        """Total power currently being absorbed by home batteries (positive = charging).
+
+        When the battery manager is zeroing the grid, all PV surplus flows into the
+        batteries and grid_w ≈ 0. Without this, the EV coordinator would compute
+        available ≈ 0 and never decide to start the car.
+        ongrid_power sign: + = discharging, - = charging (absorbing PV).
+        """
+        total = 0.0
+        for coord in self._battery_coordinators():
+            if coord.last_update_success and isinstance(coord.data, dict):
+                ongrid = coord.data.get("ongrid_power")
+                if ongrid is not None:
+                    total += max(0.0, -float(ongrid))
+        return total
+
     def _read_sensor_float(self, entity_id: str | None) -> float | None:
         if not entity_id:
             return None
@@ -177,6 +193,27 @@ class EvCoordinator(DataUpdateCoordinator):
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("go-e command failed (%s): %s", params, err)
 
+    # ---- state-change logging -------------------------------------------
+
+    _prev_ev_state: str | None = None
+
+    def _log_transition(self, state: str, reason: str, obs: "EvObservation") -> None:
+        """Log only when the EV state changes (avoids per-tick spam)."""
+        _LOGGER.debug(
+            "ev tick: state=%s reason=%s grid=%.0fW bat_charge=%.0fW soc=%s",
+            state, reason, obs.grid_w or 0.0, obs.battery_charge_w,
+            f"{obs.battery_soc:.0f}%" if obs.battery_soc is not None else "?",
+        )
+        if state == self._prev_ev_state:
+            return
+        _LOGGER.info(
+            "EV state: %s → %s | %s | grid=%.0fW bat_charge=%.0fW soc=%s",
+            self._prev_ev_state, state, reason,
+            obs.grid_w or 0.0, obs.battery_charge_w,
+            f"{obs.battery_soc:.0f}%" if obs.battery_soc is not None else "?",
+        )
+        self._prev_ev_state = state
+
     # ---- control tick ---------------------------------------------------
 
     async def _async_update_data(self) -> dict[str, Any]:
@@ -188,6 +225,7 @@ class EvCoordinator(DataUpdateCoordinator):
             except ValueError:
                 mode = EvMode.OFF
 
+            battery_charge_w = self._read_battery_charge_w()
             obs = EvObservation(
                 now=now,
                 mode=mode,
@@ -201,10 +239,12 @@ class EvCoordinator(DataUpdateCoordinator):
                 max_amp=16,
                 cur_amp=self._last_amp,
                 cur_phases=self._last_phases,
+                battery_charge_w=battery_charge_w,
             )
             plan = self._planner.plan(obs)
             self.bridge_active = plan.bridge_active
             await self._apply_plan(plan)
+            self._log_transition(plan.state, plan.reason, obs)
             return {
                 "state": plan.state,
                 "reason": plan.reason,
@@ -216,6 +256,7 @@ class EvCoordinator(DataUpdateCoordinator):
                 "car_connected": connected,
                 "car_done": done,
                 "battery_soc": obs.battery_soc,
+                "battery_charge_w": battery_charge_w,
                 "grid_w": obs.grid_w,
                 "price": obs.price,
                 "ev_mode": self._ev_mode,
@@ -229,7 +270,7 @@ class EvCoordinator(DataUpdateCoordinator):
                 "amp": 0, "phases": self._last_phases, "target_power_w": 0,
                 "bridge_active": False,
                 "car_connected": False, "car_done": False,
-                "battery_soc": None, "grid_w": None, "price": None,
+                "battery_soc": None, "battery_charge_w": 0.0, "grid_w": None, "price": None,
                 "ev_mode": self._ev_mode, "goe_configured": bool(self._goe_ip),
             }
 
