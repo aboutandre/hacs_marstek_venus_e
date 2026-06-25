@@ -5,12 +5,11 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.const import ATTR_DEVICE_ID
+from homeassistant.const import ATTR_AREA_ID, ATTR_DEVICE_ID, ATTR_ENTITY_ID
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
-from homeassistant.helpers.service import async_extract_referenced_entity_ids
 
 from .const import (
     DOMAIN,
@@ -61,23 +60,37 @@ def _target_battery_coordinators(
     if not any(call.data.get(key) for key in _TARGET_FIELD_KEYS):
         return list(batteries.values())
 
+    ent_reg = er.async_get(hass)
+    dev_reg = dr.async_get(hass)
     entry_ids: set[str] = set()
 
-    # Entities (incl. those indirectly referenced via device/area/floor/label).
-    selected = async_extract_referenced_entity_ids(hass, call)
-    ent_reg = er.async_get(hass)
-    for entity_id in selected.referenced | selected.indirectly_referenced:
+    # Resolve each target kind straight off the registries (no deprecated
+    # service helpers) into the owning config entries.
+    entity_ids = call.data.get(ATTR_ENTITY_ID)
+    if isinstance(entity_ids, str):
+        entity_ids = [entity_ids]
+    for entity_id in entity_ids or []:
         entity = ent_reg.async_get(entity_id)
         if entity and entity.config_entry_id:
             entry_ids.add(entity.config_entry_id)
 
-    # Devices map straight to their config entries — robust even if a device's
-    # entities aren't loaded yet.
-    dev_reg = dr.async_get(hass)
-    for device_id in call.data.get(ATTR_DEVICE_ID) or []:
+    device_ids = call.data.get(ATTR_DEVICE_ID)
+    if isinstance(device_ids, str):
+        device_ids = [device_ids]
+    for device_id in device_ids or []:
         device = dev_reg.async_get(device_id)
         if device:
             entry_ids.update(device.config_entries)
+
+    area_ids = call.data.get(ATTR_AREA_ID)
+    if isinstance(area_ids, str):
+        area_ids = [area_ids]
+    for area_id in area_ids or []:
+        for device in dr.async_entries_for_area(dev_reg, area_id):
+            entry_ids.update(device.config_entries)
+        for entity in er.async_entries_for_area(ent_reg, area_id):
+            if entity.config_entry_id:
+                entry_ids.add(entity.config_entry_id)
 
     return [batteries[eid] for eid in entry_ids if eid in batteries]
 
