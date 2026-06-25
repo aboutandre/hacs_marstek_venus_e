@@ -33,9 +33,10 @@ def _battery_coordinators(
 ) -> dict[str, MarstekDataUpdateCoordinator]:
     """Return only the real battery device coordinators, keyed by entry_id.
 
-    hass.data[DOMAIN] also holds the Energy Manager and EV coordinators (the
-    latter keyed ``<entry_id>_ev``). Those must never receive battery device
-    commands, so filter by type — mirrors EnergyManagerCoordinator._battery_coordinators.
+    Filtering by type keeps these services robust even if hass.data[DOMAIN]
+    ever holds non-battery objects, and lets an external orchestrator (e.g.
+    Wattsmith) target individual batteries via device_id without affecting any
+    other entries.
     """
     return {
         entry_id: coordinator

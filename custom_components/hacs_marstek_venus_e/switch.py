@@ -12,7 +12,6 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
 from .coordinator import MarstekDataUpdateCoordinator
-from .manager import EnergyManagerCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -22,50 +21,9 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up switch entities (manager enable switch, or battery LED switch)."""
+    """Set up the battery LED switch."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-
-    if isinstance(coordinator, EnergyManagerCoordinator):
-        async_add_entities([MarstekManagerEnableSwitch(coordinator, entry)])
-        return
-
     async_add_entities([MarstekLedSwitch(coordinator, entry)])
-
-
-class MarstekManagerEnableSwitch(CoordinatorEntity, SwitchEntity):
-    """Enable/disable the zero-grid Energy Manager control loop."""
-
-    _attr_has_entity_name = True
-    _attr_icon = "mdi:transmission-tower"
-
-    def __init__(self, coordinator: EnergyManagerCoordinator, entry: ConfigEntry) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_enabled"
-        self._attr_name = "Zero-Grid Control"
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry.entry_id)},
-            "name": entry.title,
-            "manufacturer": "Marstek",
-            "model": "Energy Manager",
-        }
-
-    @property
-    def is_on(self) -> bool:
-        return bool(self.coordinator.enabled)
-
-    async def _set_enabled(self, value: bool) -> None:
-        self.coordinator.enabled = value
-        new_options = {**self.coordinator.entry.options, "enabled": value}
-        self.hass.config_entries.async_update_entry(
-            self.coordinator.entry, options=new_options
-        )
-        await self.coordinator.async_request_refresh()
-
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        await self._set_enabled(True)
-
-    async def async_turn_off(self, **kwargs: Any) -> None:
-        await self._set_enabled(False)
 
 
 class MarstekLedSwitch(CoordinatorEntity, SwitchEntity):
