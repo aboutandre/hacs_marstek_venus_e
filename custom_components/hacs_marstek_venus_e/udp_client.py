@@ -6,9 +6,15 @@ import ipaddress
 import json
 import logging
 import socket
+import time
 from typing import Any
 
-from .const import DEFAULT_TIMEOUT
+from .settings import (
+    DEFAULT_PORT,
+    REQUEST_MAX_ATTEMPTS,
+    REQUEST_MIN_GAP_S,
+    REQUEST_TIMEOUT_S,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,17 +22,21 @@ _LOGGER = logging.getLogger(__name__)
 class MarstekUDPClient:
     """UDP JSON-RPC client for communicating with Marstek Venus E device."""
 
-    def __init__(self, ip_address: str, port: int = 30000, timeout: float = DEFAULT_TIMEOUT):
+    def __init__(self, ip_address: str, port: int = DEFAULT_PORT, timeout: float = REQUEST_TIMEOUT_S):
         """Initialize the UDP client.
-        
+
         Args:
             ip_address: IP address of the device
-            port: UDP port (default 30000)
-            timeout: Request timeout in seconds (default from DEFAULT_TIMEOUT constant)
+            port: UDP port (default settings.DEFAULT_PORT)
+            timeout: Per-attempt request timeout (default settings.REQUEST_TIMEOUT_S)
         """
         self.ip_address = ip_address
         self.port = port
         self.timeout = timeout
+        # Serialize all I/O to this single-threaded battery so the coordinator's
+        # polling never collides with control writes on the shared UDP radio.
+        self._lock = asyncio.Lock()
+        self._last_done: float | None = None
 
     def _get_next_id(self) -> int:
         """Get next request ID.
@@ -61,62 +71,71 @@ class MarstekUDPClient:
         if params:
             payload["params"] = params
         
-        _LOGGER.debug("Sending request to %s:%d: %s", self.ip_address, self.port, payload)
-        
-        max_attempts = 3  # UDP is lossy on the shared battery radio; one extra retry
-        for attempt in range(1, max_attempts + 1):
+        _LOGGER.debug("Request to %s:%d: %s", self.ip_address, self.port, payload)
+
+        # One request at a time per battery; transient packet loss retries
+        # quietly (DEBUG) and only an all-attempts failure is logged (WARNING),
+        # so a WARNING/ERROR here means a genuinely unreachable device.
+        async with self._lock:
+            # Give the single-threaded device breathing room since the last call.
+            if self._last_done is not None:
+                gap = REQUEST_MIN_GAP_S - (time.monotonic() - self._last_done)
+                if gap > 0:
+                    await asyncio.sleep(gap)
             try:
-                loop = asyncio.get_event_loop()
-                transport, protocol = await asyncio.wait_for(
-                    loop.create_datagram_endpoint(
-                        lambda: _UDPClientProtocol(request_id),
-                        remote_addr=(self.ip_address, self.port),
-                    ),
-                    timeout=self.timeout,
-                )
-                
-                transport.sendto(json.dumps(payload).encode("utf-8"))
-                _LOGGER.debug("Sent %s request to %s:%d with payload: %s", method, self.ip_address, self.port, payload)
-                
-                response = await asyncio.wait_for(
-                    protocol.get_response(), timeout=self.timeout
-                )
-                
-                transport.close()
-                
-                _LOGGER.debug("Received raw response from %s:%d: %s", self.ip_address, self.port, response)
-                
-                if "error" in response:
-                    error = response.get("error", {})
-                    error_msg = f"{error.get('message', 'Unknown error')} (code: {error.get('code')})"
-                    _LOGGER.error("RPC Error from %s:%d: %s", self.ip_address, self.port, error_msg)
-                    raise Exception(f"RPC Error: {error_msg}")
-                
-                result = response.get("result", {})
-                _LOGGER.debug("Extracted result from %s:%d: %s", self.ip_address, self.port, result)
-                return result
-                
-            except asyncio.TimeoutError:
-                _LOGGER.warning(
-                    "Timeout (attempt %d/%d) for method '%s' to %s:%d",
-                    attempt,
-                    max_attempts,
-                    method,
-                    self.ip_address,
-                    self.port,
-                )
-                if attempt < max_attempts:
-                    _LOGGER.debug("Retrying %s...", method)
+                for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
+                    transport = None
                     try:
+                        loop = asyncio.get_event_loop()
+                        transport, protocol = await asyncio.wait_for(
+                            loop.create_datagram_endpoint(
+                                lambda: _UDPClientProtocol(request_id),
+                                remote_addr=(self.ip_address, self.port),
+                            ),
+                            timeout=self.timeout,
+                        )
+                        transport.sendto(json.dumps(payload).encode("utf-8"))
+                        response = await asyncio.wait_for(
+                            protocol.get_response(), timeout=self.timeout
+                        )
                         transport.close()
-                    except Exception:
-                        pass
-                    continue
-                _LOGGER.error("Request timeout to %s:%d for method %s", self.ip_address, self.port, method)
-                raise
-            except Exception as err:
-                _LOGGER.error("Error communicating with %s:%d - %s", self.ip_address, self.port, err)
-                raise
+
+                        if "error" in response:
+                            error = response.get("error", {})
+                            raise Exception(
+                                f"RPC Error: {error.get('message', 'Unknown error')} "
+                                f"(code: {error.get('code')})"
+                            )
+                        _LOGGER.debug("Result from %s:%d: %s", self.ip_address, self.port, response.get("result", {}))
+                        return response.get("result", {})
+
+                    except asyncio.TimeoutError:
+                        if transport is not None:
+                            try:
+                                transport.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+                        if attempt < REQUEST_MAX_ATTEMPTS:
+                            _LOGGER.debug(
+                                "Timeout (attempt %d/%d) for %s to %s:%d — retrying",
+                                attempt, REQUEST_MAX_ATTEMPTS, method, self.ip_address, self.port,
+                            )
+                            continue
+                        _LOGGER.warning(
+                            "No response from %s:%d for %s after %d attempts",
+                            self.ip_address, self.port, method, REQUEST_MAX_ATTEMPTS,
+                        )
+                        raise
+                    except Exception as err:  # noqa: BLE001 - genuine (non-timeout) error
+                        if transport is not None:
+                            try:
+                                transport.close()
+                            except Exception:  # noqa: BLE001
+                                pass
+                        _LOGGER.error("Error talking to %s:%d (%s): %s", self.ip_address, self.port, method, err)
+                        raise
+            finally:
+                self._last_done = time.monotonic()
 
     async def get_device_info(self) -> dict[str, Any]:
         """Get device information.

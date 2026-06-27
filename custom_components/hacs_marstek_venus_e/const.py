@@ -3,11 +3,8 @@ from typing import Final
 
 DOMAIN: Final = "hacs_marstek_venus_e"
 
-# Device Configuration
-DEFAULT_PORT: Final = 30000
-DEFAULT_SCAN_INTERVAL: Final = 60  # seconds (1 minute)
-DEFAULT_TIMEOUT: Final = 30.0  # seconds - UDP request timeout (API requires 30s)
-MIN_TIME_BETWEEN_REQUESTS: Final = 30.0  # seconds - minimum time between UDP requests per API spec
+# Device transport + polling tuning (port, timeouts, retries, poll cadences)
+# is centralized in settings.py — see that file to retune.
 
 # Modes
 MODE_AUTO: Final = "Auto"

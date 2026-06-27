@@ -15,7 +15,6 @@ from .const import (
     CONF_BLE_MAC,
     CONF_TIMEOUT,
     CONF_SCAN_INTERVAL,
-    DEFAULT_SCAN_INTERVAL,
     DOMAIN,
     MODE_AUTO,
     MODE_AI,

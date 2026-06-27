@@ -10,7 +10,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, DEFAULT_SCAN_INTERVAL, CONF_IP_ADDRESS, CONF_PORT, CONF_SCAN_INTERVAL
+from .const import DOMAIN, CONF_IP_ADDRESS, CONF_PORT, CONF_SCAN_INTERVAL
+from .settings import BATTERY_INFO_INTERVAL_S, MODE_POLL_INTERVAL_S, SCAN_INTERVAL_S
 from .udp_client import MarstekUDPClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -35,7 +36,7 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
             scan_interval_seconds = scan_interval_minutes * 60
         else:
             # Use default (already in seconds)
-            scan_interval_seconds = DEFAULT_SCAN_INTERVAL
+            scan_interval_seconds = SCAN_INTERVAL_S
         
         super().__init__(
             hass,
@@ -53,9 +54,12 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         # Storage for manual API call results
         self.battery_data: dict[str, Any] = {}
         self.mode_data: dict[str, Any] = {}
-        # Track last battery data update (every 60 minutes instead of 30 seconds)
+        # Slow-changing data — poll on its own relaxed cadence (see settings.py),
+        # not every cycle, to keep the per-battery radio quiet.
         self._last_battery_update: datetime | None = None
-        self._battery_update_interval = timedelta(minutes=60)
+        self._battery_update_interval = timedelta(seconds=BATTERY_INFO_INTERVAL_S)
+        self._last_mode_update: datetime | None = None
+        self._mode_update_interval = timedelta(seconds=MODE_POLL_INTERVAL_S)
         # CT (energy-meter) presence. None = unknown (keep probing), False = no CT
         # detected at startup (stop polling EM.GetStatus — saves a wasted request per
         # cycle and the associated timeouts/log-noise), True = CT present (keep polling).
@@ -100,23 +104,25 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
                     _LOGGER.debug("Failed to get battery data: %s", battery_err)
                     # Battery data is optional, don't fail the entire update
             
-            # Also get mode data - ES.GetMode returns mode, ongrid_power, offgrid_power, bat_soc, CT data
-            # Store in mode_data for sensors that need it
-            try:
-                self.mode_data = await self.client.get_energy_system_mode()
-                # Add mode to main data for easy access
-                if "mode" in self.mode_data:
-                    data["mode"] = self.mode_data["mode"]
-                
-                # Add CT meter data to mode_data (ES.GetMode includes it)
-                # Apply scaling for energy values (*0.1 as per API documentation)
-                if "input_energy" in self.mode_data:
-                    self.mode_data["input_energy"] = round(self.mode_data.get("input_energy", 0) * 0.1, 1)
-                if "output_energy" in self.mode_data:
-                    self.mode_data["output_energy"] = round(self.mode_data.get("output_energy", 0) * 0.1, 1)
-            except Exception as mode_err:
-                _LOGGER.warning("Failed to get mode data: %s", mode_err)
-                # Don't fail the entire update if mode fetch fails
+            # ES.GetMode (operating-mode + CT data) changes rarely — poll it on a
+            # slow cadence (settings.MODE_POLL_INTERVAL_S), NOT every cycle. SOC /
+            # power already come from ES.GetStatus above, so the control path is
+            # unaffected; this just refreshes the operating-mode sensor.
+            if self._last_mode_update is None or (now - self._last_mode_update) >= self._mode_update_interval:
+                try:
+                    self.mode_data = await self.client.get_energy_system_mode()
+                    self._last_mode_update = now
+                    # Apply scaling for energy values (*0.1 as per API documentation)
+                    if "input_energy" in self.mode_data:
+                        self.mode_data["input_energy"] = round(self.mode_data.get("input_energy", 0) * 0.1, 1)
+                    if "output_energy" in self.mode_data:
+                        self.mode_data["output_energy"] = round(self.mode_data.get("output_energy", 0) * 0.1, 1)
+                except Exception as mode_err:
+                    # Optional data; transient loss is fine — don't spam the log.
+                    _LOGGER.debug("Failed to get mode data: %s", mode_err)
+            # Surface the latest known operating mode each cycle (from the slow poll).
+            if self.mode_data and "mode" in self.mode_data:
+                data["mode"] = self.mode_data["mode"]
             
             # Also try to get EM (energy-meter / CT clamp) status — but ONLY if a CT
             # might be present. If we detected no CT at startup (ct_state == 0), skip the
@@ -163,8 +169,10 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
             
             return data
         except Exception as err:
-            _LOGGER.error("Failed to get device data: %s", err)
-            raise UpdateFailed(f"Failed to update data: {err}")
+            # HA's DataUpdateCoordinator logs UpdateFailed once then suppresses
+            # repeats — don't double-log here. A genuine all-attempts failure was
+            # already surfaced by udp_client (one WARNING).
+            raise UpdateFailed(f"Failed to update data: {err}") from err
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""
