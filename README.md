@@ -9,6 +9,27 @@
 
 A comprehensive Home Assistant custom integration for the **Marstek Venus E** battery energy storage system. This integration provides full local control and monitoring via the device's UDP JSON-RPC API.
 
+> **Fork notice** — This is a fork of [yuyuki/hacs_marstek_venus_e][upstream]
+> (upstream v2.2.0, this fork v2.4.0). Changes relative to upstream:
+>
+> - **Device-targetable services** — `set_passive_mode` and `set_mode` now
+>   accept an optional HA target (device, entity, area), so multi-battery setups
+>   can control individual batteries. Both services return a per-battery ack via
+>   `SupportsResponse.OPTIONAL` so callers can detect silent UDP drops.
+> - **UDP robustness** — `asyncio.Lock` per battery to prevent poll/write
+>   collisions; per-attempt timeout of 4 s (was 30 s); retries logged at DEBUG,
+>   final failure at WARNING; `ES.GetMode` demoted from every scan to every 5 min.
+> - **Brain removed** — the built-in Energy Manager / EV coordinator has been
+>   extracted into a separate HACS integration ([Wattsmith][wattsmith]) so this
+>   integration remains a pure device driver.
+> - **Centralized settings** — all transport and polling tunables live in
+>   `settings.py` (see that file's comments for interacting-dial invariants).
+>
+> A PR proposing the targeting + UDP robustness changes upstream is in progress.
+>
+> [upstream]: https://github.com/yuyuki/hacs_marstek_venus_e
+> [wattsmith]: https://github.com/aboutandre/wattsmith
+
 <!-- vscode-markdown-toc -->
 * 1. [Features](#Features)
 * [⚡ Energy Manager (Zero-Grid Multi-Battery Coordination)](#EnergyManager)
@@ -765,12 +786,11 @@ python tests/test_discovery.py
 python tests/test_es_get_status.py --ip 192.168.0.225
 ```
 
-**Hardware-free unit tests** cover the Energy Manager's control and safety logic (no device or
-Home Assistant needed — pure Python), and run standalone or under pytest:
+**Hardware-free unit tests** cover UDP serialization behaviour (lock, min-gap,
+retry/timeout logging) — no device or Home Assistant needed:
 
 ```bash
-python tests/test_controller.py   # zero-grid PD controller + SOC split
-python tests/test_safety.py       # safety supervisor (staleness, health, watchdog)
+python tests/test_udp_serialization.py   # lock, min-gap, retry, payload building
 ```
 
 If you want a more detailed guide for the available scripts, see [`tests/README_TESTS.md`](tests/README_TESTS.md).
