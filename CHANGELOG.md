@@ -2,6 +2,35 @@
 
 All notable changes to the Marstek Venus E Home Assistant Integration will be documented in this file.
 
+## [2.5.0] - 2026-07-04
+
+Reliability fixes from the 2026-07-04 home-energy-lab audit (F-04/F-09/F-10/F-12).
+
+### Fixed
+- **A device response is not an ack**: `set_mode` / `set_passive_mode` now check
+  the Marstek's `set_result` field and raise on an explicit `false`, so the
+  services report `{ok: false}` for a rejected command instead of a phantom ack.
+  Only an explicit `false` is a rejection (older firmware may omit the field).
+- **UDP duplicate-datagram guard**: a duplicated reply no longer raises
+  `InvalidStateError` on the already-resolved response future.
+
+### Changed
+- **Request budget invariant restored**: `REQUEST_TIMEOUT_S` 4.0 → 2.0 s so the
+  worst-case request chain (3 attempts + gaps = 6.4 s) fits inside an external
+  brain's setpoint window (resend 7 s < cd_time 10 s). Previously 12.4 s — one
+  deaf battery could stall the control tick past cd_time and briefly idle the
+  healthy batteries.
+- **No data refresh per passive setpoint**: `set_passive_mode` no longer calls
+  `async_request_refresh()` — an external brain re-arms setpoints every few
+  seconds and the per-write refresh roughly doubled the per-battery radio
+  traffic (the congestion behind the June timeout storms).
+
+### Added
+- `tests/test_set_result_ack.py` — headless contract tests for the ack path,
+  the no-refresh behavior and the duplicate-datagram guard (7 tests).
+- `tests/test_timeout_handling.py` repaired (was broken since the settings
+  refactor) and now asserts against `settings.py` instead of stale constants.
+
 ## [2.2.0] - 2026-04-12
 
 ### Added

@@ -10,29 +10,51 @@ import asyncio
 import sys
 import logging
 import importlib.util
+from pathlib import Path
+
+# Anchor to this file so the test runs from any working directory.
+_COMPONENT_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "hacs_marstek_venus_e"
+
+# Register the parent packages so udp_client's relative imports (.settings, .const)
+# resolve without importing __init__.py (which would pull in Home Assistant).
+from types import ModuleType
+sys.modules.setdefault("custom_components", ModuleType("custom_components"))
+sys.modules.setdefault(
+    "custom_components.hacs_marstek_venus_e",
+    ModuleType("custom_components.hacs_marstek_venus_e"),
+)
 
 # Load modules directly without triggering __init__.py
 def load_module_from_file(module_name, file_path):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     module = importlib.util.module_from_spec(spec)
+    module.__package__ = "custom_components.hacs_marstek_venus_e"
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
+# settings must be importable as .settings before udp_client loads
+settings = load_module_from_file(
+    "custom_components.hacs_marstek_venus_e.settings",
+    _COMPONENT_DIR / "settings.py"
+)
+
 # Load const module first (udp_client depends on it)
 const = load_module_from_file(
     "custom_components.hacs_marstek_venus_e.const",
-    "../custom_components/hacs_marstek_venus_e/const.py"
+    _COMPONENT_DIR / "const.py"
 )
 
 # Load udp_client module
 udp_client = load_module_from_file(
     "custom_components.hacs_marstek_venus_e.udp_client",
-    "../custom_components/hacs_marstek_venus_e/udp_client.py"
+    _COMPONENT_DIR / "udp_client.py"
 )
 
 MarstekUDPClient = udp_client.MarstekUDPClient
-DEFAULT_TIMEOUT = const.DEFAULT_TIMEOUT
+# Transport dials live in settings.py (single source of truth), not const.
+DEFAULT_TIMEOUT = settings.REQUEST_TIMEOUT_S
+MAX_ATTEMPTS = settings.REQUEST_MAX_ATTEMPTS
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -51,8 +73,7 @@ async def test_default_timeout():
     print(f"✓ Default timeout constant: {DEFAULT_TIMEOUT} seconds")
     print(f"✓ Client timeout: {client.timeout} seconds")
     
-    assert client.timeout == DEFAULT_TIMEOUT, "Client timeout doesn't match constant"
-    assert client.timeout == 10.0, "Default timeout should be 10 seconds"
+    assert client.timeout == DEFAULT_TIMEOUT, "Client timeout doesn't match settings.REQUEST_TIMEOUT_S"
     
     print("✓ DEFAULT TIMEOUT TEST PASSED\n")
 
@@ -155,8 +176,8 @@ async def main():
     
     print(f"\n📡 Using device IP: {ip_address}")
     print(f"⏱️  Timeout: {DEFAULT_TIMEOUT} seconds")
-    print(f"🔁 Retry attempts: 2")
-    print(f"⏳ Max wait per call: {DEFAULT_TIMEOUT * 2} seconds\n")
+    print(f"🔁 Retry attempts: {MAX_ATTEMPTS}")
+    print(f"⏳ Max wait per call: {DEFAULT_TIMEOUT * MAX_ATTEMPTS} seconds\n")
     
     # Test 3: Actual API calls with new timeout
     await test_api_call_with_new_timeout(ip_address)
@@ -168,9 +189,10 @@ async def main():
     print("ALL TIMEOUT TESTS COMPLETED")
     print("="*60)
     print("\n💡 Summary:")
-    print("   • Default timeout increased from 5s to 10s")
-    print("   • Each API call attempts twice before failing")
-    print("   • Maximum wait per call: 20 seconds (2 × 10s)")
+    print(f"   • Per-attempt timeout: {DEFAULT_TIMEOUT}s (settings.REQUEST_TIMEOUT_S)")
+    print(f"   • Each API call attempts {MAX_ATTEMPTS}× before failing")
+    print(f"   • Maximum wait per call: {DEFAULT_TIMEOUT * MAX_ATTEMPTS}s — kept inside the")
+    print("     brain's setpoint window (see settings.py budget invariant)")
     print("   • Coordinator continues if at least one API call succeeds")
     print("\n")
 

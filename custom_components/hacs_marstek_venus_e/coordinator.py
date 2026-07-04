@@ -17,6 +17,17 @@ from .udp_client import MarstekUDPClient
 _LOGGER = logging.getLogger(__name__)
 
 
+def _raise_if_rejected(response: dict[str, Any] | None, what: str) -> None:
+    """A device RESPONSE is not an ACK: Marstek replies {"set_result": false}
+    when it refuses a command. Only an explicit false is a rejection (older
+    firmware may omit the field). Raising here makes the rejection flow into
+    the services' per-battery {ok: false} result, so an external brain's
+    safety watchdog sees the truth instead of a phantom ack (audit F-04).
+    """
+    if isinstance(response, dict) and response.get("set_result") is False:
+        raise Exception(f"device rejected {what} (set_result=false)")
+
+
 class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
     """Data update coordinator for Marstek Venus E."""
 
@@ -180,11 +191,16 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def set_mode(self, mode: str) -> None:
         """Set operating mode.
-        
+
         Args:
             mode: Operating mode
+
+        Raises:
+            Exception: if the device answers but REJECTS the command
+                (set_result false). Callers (the services) turn this into a
+                per-battery nack so an external brain sees the truth.
         """
-        await self.client.set_mode(mode)
+        _raise_if_rejected(await self.client.set_mode(mode), f"set_mode {mode}")
         await self.async_request_refresh()
 
     async def set_manual_schedule(
@@ -218,13 +234,20 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def set_passive_mode(self, power: int, cd_time: int = 0) -> None:
         """Set passive mode.
-        
+
         Args:
             power: Target power
             cd_time: Countdown time
+
+        Raises:
+            Exception: if the device answers but REJECTS the setpoint
+                (set_result false) — a response is NOT an ack. The zero-grid
+                brain re-arms setpoints every few seconds, so no data refresh
+                is triggered here (it used to double the radio traffic and
+                feed the very UDP congestion that caused timeout storms).
         """
-        await self.client.set_passive_mode(power=power, cd_time=cd_time)
-        await self.async_request_refresh()
+        resp = await self.client.set_passive_mode(power=power, cd_time=cd_time)
+        _raise_if_rejected(resp, f"set_passive_mode {power}W cd={cd_time}")
 
     async def clear_all_manual_schedules(self) -> dict[str, Any]:
         """Clear all manual schedules.

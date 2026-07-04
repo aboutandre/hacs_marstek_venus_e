@@ -23,7 +23,14 @@ from typing import Final
 DEFAULT_PORT: Final[int] = 30000
 
 # --- UDP transport (per battery; serialized by MarstekUDPClient's lock) -------
-REQUEST_TIMEOUT_S: Final[float] = 4.0      # device replies in ~1 s; 4 s covers a slow reply + margin
+# Budget invariant (audit F-09): the WORST-CASE request chain must finish inside
+# the brain's setpoint window, or healthy batteries idle past cd_time while one
+# sick battery stalls the tick:
+#   ATTEMPTS × TIMEOUT + (ATTEMPTS−1) × MIN_GAP  =  3×2.0 + 2×0.2  =  6.4 s
+#   6.4 s  <  MANAGER_RESEND_S (7 s)  <  MANAGER_CD_TIME_S (10 s)   ✓
+# (The device replies in ~1 s; 2 s still covers a slow reply. The previous 4 s
+# violated this: 3×4+0.4 = 12.4 s > cd_time.)
+REQUEST_TIMEOUT_S: Final[float] = 2.0      # per-attempt reply timeout
 REQUEST_MAX_ATTEMPTS: Final[int] = 3       # retries on packet loss (UDP is lossy on the shared radio)
 REQUEST_MIN_GAP_S: Final[float] = 0.2      # min spacing between two requests to the SAME battery
 

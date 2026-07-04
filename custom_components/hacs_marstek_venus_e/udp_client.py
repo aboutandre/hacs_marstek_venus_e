@@ -635,17 +635,22 @@ class _UDPClientProtocol(asyncio.DatagramProtocol):
             data: Received data bytes
             addr: Source address tuple
         """
+        # A duplicated datagram (UDP can duplicate) must not blow up the protocol:
+        # only the first response resolves the future, later ones are dropped.
+        if self._response_future.done():
+            _LOGGER.debug("Dropping extra datagram from %s (request already resolved)", addr)
+            return
         try:
             response = json.loads(data.decode("utf-8"))
-            
+
             # Marstek device always responds with id: 0, so accept it regardless of request ID
             # We still check for the expected ID first for compatibility, but fall back to id: 0
             if response.get("id") == self.expected_id or response.get("id") == 0:
                 self._response_future.set_result(response)
             else:
-                _LOGGER.warning("Received response with unexpected ID: %s (expected: %s)", 
+                _LOGGER.warning("Received response with unexpected ID: %s (expected: %s)",
                                response.get("id"), self.expected_id)
-                
+
         except json.JSONDecodeError as err:
             self._response_future.set_exception(err)
 
