@@ -2,6 +2,28 @@
 
 All notable changes to the Marstek Venus E Home Assistant Integration will be documented in this file.
 
+## [2.5.1] - 2026-10-26
+
+Rides out the periodic Local API silences of EMS firmware V150 (home-energy-lab hel-138).
+
+### Fixed
+- **One missed poll no longer makes the battery unavailable.** V150 closes its
+  Local API for ~5-30 s on a fixed ~34 min timer. A failed `ES.GetStatus` used
+  to raise straight away, so every entity went unavailable for a whole scan
+  interval (60 s): a "Fleet SOC" template that counts unavailable as 0 dipped by
+  a third, and an external brain dropped the battery from dispatch for that
+  minute. Now the coordinator keeps the last good reading for up to
+  `POLL_GRACE_S` (120 s) and re-polls every `POLL_RETRY_S` (10 s) until the
+  device answers. A battery that stays silent past the grace window still goes
+  unavailable. One INFO line per silence records how long it lasted.
+- **"Connection refused" is retried like a timeout.** It used to fail the
+  request on the first attempt. A refused attempt now waits out the rest of its
+  timeout before retrying, so the worst-case request time is unchanged.
+
+### Added
+- `tests/test_poll_grace.py` — grace window, cadence restore, unavailable past
+  grace, and refused-then-retry (7 tests).
+
 ## [2.5.0] - 2026-07-04
 
 Reliability fixes from the 2026-07-04 home-energy-lab audit (F-04/F-09/F-10/F-12).
