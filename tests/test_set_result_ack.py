@@ -63,6 +63,8 @@ _settings.REQUEST_MIN_GAP_S = 0.2
 _settings.SCAN_INTERVAL_S = 60
 _settings.MODE_POLL_INTERVAL_S = 300
 _settings.BATTERY_INFO_INTERVAL_S = 3600
+_settings.POLL_RETRY_S = 10
+_settings.POLL_GRACE_S = 120
 sys.modules["hacs_marstek_venus_e.settings"] = _settings
 
 _base = Path(__file__).resolve().parents[1] / "custom_components" / "hacs_marstek_venus_e"

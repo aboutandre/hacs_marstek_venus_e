@@ -40,3 +40,15 @@ REQUEST_MIN_GAP_S: Final[float] = 0.2      # min spacing between two requests to
 SCAN_INTERVAL_S: Final[int] = 60           # ES.GetStatus (SOC + power) — the per-cycle poll
 MODE_POLL_INTERVAL_S: Final[int] = 300     # ES.GetMode (operating-mode sensor) — was every cycle
 BATTERY_INFO_INTERVAL_S: Final[int] = 3600  # Bat.GetStatus (temperature / rated capacity)
+
+# --- Riding out short device silences (hel-138) -------------------------------
+# EMS firmware V150 closes its Local API for ~5-30 s on a fixed ~34 min timer
+# (port refused or no reply). Without a grace window ONE failed ES.GetStatus made
+# every entity unavailable for a whole SCAN_INTERVAL_S, which dropped the battery
+# out of a "Fleet SOC" average and out of the brain's dispatch set for that minute.
+# Instead: keep serving the last good reading and re-poll quickly.
+#   POLL_RETRY_S  ≪  SCAN_INTERVAL_S   (re-poll soon after a failed poll)
+#   POLL_GRACE_S  ≫  the longest silence seen (~30 s), but bounded: a battery that
+#   is really gone must still go unavailable so the brain excludes it (≤ ~2 min).
+POLL_RETRY_S: Final[int] = 10              # re-poll this soon after a failed ES.GetStatus
+POLL_GRACE_S: Final[int] = 120             # serve the last good reading this long, then unavailable

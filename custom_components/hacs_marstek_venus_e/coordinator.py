@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import timedelta, datetime
 from typing import Any
 
@@ -11,7 +12,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, CONF_IP_ADDRESS, CONF_PORT, CONF_SCAN_INTERVAL
-from .settings import BATTERY_INFO_INTERVAL_S, MODE_POLL_INTERVAL_S, SCAN_INTERVAL_S
+from .settings import (
+    BATTERY_INFO_INTERVAL_S,
+    MODE_POLL_INTERVAL_S,
+    POLL_GRACE_S,
+    POLL_RETRY_S,
+    SCAN_INTERVAL_S,
+)
 from .udp_client import MarstekUDPClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,6 +92,13 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         self._poll_stagger_s = round((idx * scan_interval_seconds / 3.0) % scan_interval_seconds, 1)
         self._refreshes = 0
 
+        # Grace for short device silences (settings.POLL_GRACE_S, hel-138): when
+        # ES.GetStatus fails we keep the last good reading and re-poll after
+        # POLL_RETRY_S instead of going unavailable for a whole scan interval.
+        self._scan_interval = timedelta(seconds=scan_interval_seconds)
+        self._last_ok: float | None = None       # monotonic time of the last good poll
+        self._silent_since: float | None = None  # first failed poll of the current silence
+
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from device.
         
@@ -103,6 +117,7 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         try:
             # Get energy system status - this includes all key metrics (every 30 seconds)
             data = await self.client.get_energy_system_status()
+            self._mark_ok()
             
             # Get battery status every 5 minutes to avoid draining battery with frequent requests
             now = datetime.now()
@@ -180,10 +195,36 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
             
             return data
         except Exception as err:
+            now = time.monotonic()
+            if self._silent_since is None:
+                self._silent_since = now
+            if self.data and self._last_ok is not None and now - self._last_ok < POLL_GRACE_S:
+                # Short silence: keep the entities on the last good reading and
+                # come back soon rather than in a full scan interval.
+                self.update_interval = timedelta(seconds=POLL_RETRY_S)
+                _LOGGER.debug(
+                    "%s silent for %.0fs, serving the last reading (grace %ds): %s",
+                    self.client.ip_address, now - self._silent_since, POLL_GRACE_S, err,
+                )
+                return self.data
+            self.update_interval = self._scan_interval
             # HA's DataUpdateCoordinator logs UpdateFailed once then suppresses
             # repeats — don't double-log here. A genuine all-attempts failure was
             # already surfaced by udp_client (one WARNING).
             raise UpdateFailed(f"Failed to update data: {err}") from err
+
+    def _mark_ok(self) -> None:
+        """Record a good ES.GetStatus; end any silence and restore the cadence."""
+        now = time.monotonic()
+        if self._silent_since is not None:
+            _LOGGER.info(
+                "%s answered again after %.0fs of silence",
+                self.client.ip_address, now - self._silent_since,
+            )
+            self._silent_since = None
+        self._last_ok = now
+        if self.update_interval != self._scan_interval:
+            self.update_interval = self._scan_interval
 
     async def async_shutdown(self) -> None:
         """Shutdown the coordinator."""

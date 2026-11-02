@@ -85,6 +85,7 @@ class MarstekUDPClient:
             try:
                 for attempt in range(1, REQUEST_MAX_ATTEMPTS + 1):
                     transport = None
+                    attempt_start = time.monotonic()
                     try:
                         loop = asyncio.get_event_loop()
                         transport, protocol = await asyncio.wait_for(
@@ -109,21 +110,31 @@ class MarstekUDPClient:
                         _LOGGER.debug("Result from %s:%d: %s", self.ip_address, self.port, response.get("result", {}))
                         return response.get("result", {})
 
-                    except asyncio.TimeoutError:
+                    except (asyncio.TimeoutError, ConnectionRefusedError) as err:
+                        # Both are transient: a lost packet, or (firmware V150, hel-138)
+                        # the device briefly closing its Local API port. A refusal
+                        # comes back instantly, so wait out the rest of this attempt's
+                        # window before retrying — the retries then span the same
+                        # time as timeouts would and the budget invariant holds.
                         if transport is not None:
                             try:
                                 transport.close()
                             except Exception:  # noqa: BLE001
                                 pass
+                        reason = "refused" if isinstance(err, ConnectionRefusedError) else "timeout"
                         if attempt < REQUEST_MAX_ATTEMPTS:
                             _LOGGER.debug(
-                                "Timeout (attempt %d/%d) for %s to %s:%d — retrying",
-                                attempt, REQUEST_MAX_ATTEMPTS, method, self.ip_address, self.port,
+                                "%s (attempt %d/%d) for %s to %s:%d — retrying",
+                                reason, attempt, REQUEST_MAX_ATTEMPTS, method, self.ip_address, self.port,
                             )
+                            if reason == "refused":
+                                rest = self.timeout - (time.monotonic() - attempt_start)
+                                if rest > 0:
+                                    await asyncio.sleep(rest)
                             continue
                         _LOGGER.warning(
-                            "No response from %s:%d for %s after %d attempts",
-                            self.ip_address, self.port, method, REQUEST_MAX_ATTEMPTS,
+                            "No response from %s:%d for %s after %d attempts (last: %s)",
+                            self.ip_address, self.port, method, REQUEST_MAX_ATTEMPTS, reason,
                         )
                         raise
                     except Exception as err:  # noqa: BLE001 - genuine (non-timeout) error
